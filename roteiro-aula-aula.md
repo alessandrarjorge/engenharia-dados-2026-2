@@ -84,21 +84,21 @@ Faça o download do instalador a partir do seguinte link:  https://git-scm.com/i
 Toda a estrutura do curso seguirá uma organização padronizada que reflete a arquitetura Medallion. Execute os comandos abaixo para criar o projeto base:
 
 ```cmd
-PS C:\ mkdir ~/engenharia-dados
-PS C:\ cd ~/engenharia-dados
-PS C:\Users\mamaz\engenharia-dados> mkdir notebooks, scripts, dbt_project, airflow/dags, docker, data/bronze, data/silver, data/gold
-PS C:\Users\mamaz\engenharia-dados> echo "" > notebooks/README.md
-PS C:\Users\mamaz\engenharia-dados> echo "" > scripts/README.md
-PS C:\Users\mamaz\engenharia-dados> echo "" > dbt_project/README.md
-PS C:\Users\mamaz\engenharia-dados> echo "" > airflow/dags/README.md
-PS C:\Users\mamaz\engenharia-dados> echo "" > docker/README.md
-PS C:\Users\mamaz\engenharia-dados> echo "" > data/bronze/README.md
-PS C:\Users\mamaz\engenharia-dados> echo "" > data/silver/README.md
-PS C:\Users\mamaz\engenharia-dados> echo "" > data/gold/README.md
-PS C:\Users\mamaz\engenharia-dados> python -m venv .venv
-PS C:\Users\mamaz\engenharia-dados> Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
-PS C:\Users\mamaz\engenharia-dados> .\.venv\Scripts\Activate.ps1
-PS C:\Users\mamaz\engenharia-dados> pip install pandas pyarrow boto3 jupyter notebook
+PS C:\ mkdir ~/engenharia-dados-2026-2
+PS C:\ cd ~/engenharia-dados-2026-2
+PS C:\Users\mamaz\engenharia-dados-2026-2> mkdir notebooks, scripts, dbt_project, airflow/dags, docker, data/bronze, data/silver, data/gold
+PS C:\Users\mamaz\engenharia-dados-2026-2> echo "" > notebooks/README.md
+PS C:\Users\mamaz\engenharia-dados-2026-2> echo "" > scripts/README.md
+PS C:\Users\mamaz\engenharia-dados-2026-2> echo "" > dbt_project/README.md
+PS C:\Users\mamaz\engenharia-dados-2026-2> echo "" > airflow/dags/README.md
+PS C:\Users\mamaz\engenharia-dados-2026-2> echo "" > docker/README.md
+PS C:\Users\mamaz\engenharia-dados-2026-2> echo "" > data/bronze/README.md
+PS C:\Users\mamaz\engenharia-dados-2026-2> echo "" > data/silver/README.md
+PS C:\Users\mamaz\engenharia-dados-2026-2> echo "" > data/gold/README.md
+PS C:\Users\mamaz\engenharia-dados-2026-2> python -m venv .venv
+PS C:\Users\mamaz\engenharia-dados-2026-2> Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
+PS C:\Users\mamaz\engenharia-dados-2026-2> .\.venv\Scripts\Activate.ps1
+PS C:\Users\mamaz\engenharia-dados-2026-2> pip install pandas pyarrow boto3 jupyter notebook
 ```
 ---
 
@@ -108,7 +108,7 @@ Crie um arquivo .gitignore com o seguinte conteúdo na pasta engenharia-dados:
 
 Abra o arquivo utilizando o vscode:
 ```cmd
-PS C:\Users\mamaz\engenharia-dados> code .gitignore
+PS C:\Users\mamaz\engenharia-dados-2026-2> code .gitignore
 ```
 
 Copie o seguinte conteúdo:
@@ -129,12 +129,12 @@ data/
 Nosso primeiro commit:
 
 ```cmd
-PS C:\Users\mamaz\engenharia-dados> git init
-PS C:\Users\mamaz\engenharia-dados> git config user.name "Seu Nome"
-PS C:\Users\mamaz\engenharia-dados> git config user.email "Seu email"
-PS C:\Users\mamaz\engenharia-dados> git config --list
-PS C:\Users\mamaz\engenharia-dados> git add .
-PS C:\Users\mamaz\engenharia-dados> git commit -m "feat: estrutura inicial do projeto do curso"
+PS C:\Users\mamaz\engenharia-dados-2026-2> git init
+PS C:\Users\mamaz\engenharia-dados-2026-2> git config user.name "Seu Nome"
+PS C:\Users\mamaz\engenharia-dados-2026-2> git config user.email "Seu email"
+PS C:\Users\mamaz\engenharia-dados-2026-2> git config --list
+PS C:\Users\mamaz\engenharia-dados-2026-2> git add .
+PS C:\Users\mamaz\engenharia-dados-2026-2> git commit -m "feat: estrutura inicial do projeto do curso"
 ```
 
 ### Verificação Final da Atividade 1
@@ -176,7 +176,7 @@ else:
 Para executar:
 
 ```cmd
-PS C:\Users\mamaz\engenharia-dados> python .\scripts\teste_instalacao_python.py
+PS C:\Users\mamaz\engenharia-dados-2026-2> python .\scripts\teste_instalacao_python.py
 ```
 
 ---
@@ -198,7 +198,7 @@ A compatibilidade com a API S3 é fundamental: ferramentas como Apache Spark, Du
 ### Passo 1 — Criação do Arquivo Docker Compose para o MinIO
 
 ```bash
-cd ~/engenharia-dados-curso/docker
+cd ~/engenharia-dados-2026-2/docker
 
 cat > compose.yml << 'EOF'
 services:
@@ -238,7 +238,7 @@ EOF
 
 ```bash
 # Navegar para o diretório docker
-cd ~/engenharia-dados-curso/docker
+cd ~/engenharia-dados-2026-2/docker
 
 # Iniciar o MinIO em segundo plano
 docker compose up -d
@@ -379,7 +379,7 @@ if __name__ == "__main__":
 Execute o script:
 
 ```bash
-cd ~/engenharia-dados-curso
+cd ~/engenharia-dados-2026-2
 source .venv/bin/activate
 python scripts/setup_minio.py
 ```
@@ -514,8 +514,8 @@ Esta atividade utiliza o dataset **Iris** do UCI Machine Learning Repository par
 ### Passo 1 — Criação do Jupyter Notebook
 
 ```bash
-cd ~/engenharia-dados-curso
-source .venv/bin/activate
+cd ~/engenharia-dados-curso-2026-2
+source .venv/Scripts/activate
 
 # Iniciar o Jupyter Notebook
 jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser
@@ -963,7 +963,7 @@ Instalar e configurar o **Airbyte Open Source** via Docker Compose, explorar sua
 
 ### Contexto
 
-O Airbyte é uma plataforma open source de integração de dados que oferece mais de 350 conectores pré-construídos para bancos de dados, APIs, arquivos e serviços SaaS[[1]](#ref1). Sua arquitetura baseada em contêineres Docker permite que cada conector seja executado de forma isolada, garantindo que uma falha em uma conexão não afete as demais. Em ambientes de produção, o Airbyte é implantado em Kubernetes para escalabilidade horizontal.
+O Airbyte é uma plataforma open source de integração de dados que oferece mais de 350 conectores pré-construídos para bancos de dados, APIs, arquivos e serviços SaaS[[1]](https://airbyte.com/). Sua arquitetura baseada em contêineres Docker permite que cada conector seja executado de forma isolada, garantindo que uma falha em uma conexão não afete as demais. Em ambientes de produção, o Airbyte é implantado em Kubernetes para escalabilidade horizontal.
 
 ---
 
@@ -973,29 +973,203 @@ O Airbyte requer vários serviços internos (servidor, worker, banco de dados de
 
 ```bash
 # Navegar para o diretório de trabalho do curso
-cd ~/engenharia-dados-curso
+cd ~/engenharia-dados-2026-2
 
 # Criar um subdiretório dedicado ao Airbyte
 mkdir -p airbyte && cd airbyte
 
 ```
-
 --- 
 
 ### Instalação no Windows
 
-1. Na página: https://github.com/airbytehq/abctl/releases/latest faça o download da versão para o windows
-2. Descompacte o arquivo e coloque a pasta do abctl.exe no path
-3. Com o docker desktop aberto, execute:
+### Passo 2 - Instalação do airbyte
 
+Na página: https://github.com/airbytehq/abctl/releases/latest faça o download da versão para o windows.
+
+Instalar o abctl.exe a partir do seguinte endereço:
+
+[Airbyte](https://docs.airbyte.com/platform/using-airbyte/getting-started/oss-quickstart)
+
+### Instalação como usuário não privilegiado:
+
+Após fazer o download, extrair o arquivo.
+
+Dentro da pasta que será criada, localize o arquivo abctl.exe.
+
+Crie uma pasta airbyte em:
+
+C:\Users\{seu_usuario}\AppData\Local\airbyte
+
+Copie o arquivo abctl.exe para essa pasta.
+
+Edite a sua variável de ambiente PATH e inclua o caminho: 
+
+C:\Users\{seu_usuario}\AppData\Local\airbyte
+
+Após terminar a instalação, configurar seu usuário e senha:
 
 ```cmd
 abctl local install
 ```
 
-3. ALTERNATIVO: Em máquinas com poucos recursos, use:
+ALTERNATIVO: Em máquinas com poucos recursos, use:
 
 ```cmd
 abctl local install --low-resource-mode
 ```
+
+```cmd
+abctl local credentials --email SeuEmail --password SuaSenhaSegura
+```
+
+Se você quiser alterar sua senha, posteriormente:
+
+```cmd
+abctl local credentials --password SuaSenhaSegura
+```
+
+## A estrutura que será criada em nosso repositório ##
+````
+bronze/
+└── airbyte/
+└──-------rest-countries-api/
+└──------------ 2026_10_14_193910319_0.parquet
+
+````
+
+Configuração do endpoint do airbyte:
+
+![alt text](airbyte/image.png)
+
+Configuração da fonte https:
+
+Iremos utilizar a url do restcountries API que você pode encontrar em: 
+
+[Rest Countries](https://restcountries.com/)
+
+### Passo 3 — Acesso à Interface Web do Airbyte
+
+Após termos feito a instalação do Airbyte, acessaremos a interface web do Airbyte:
+
+```
+URL:   http://localhost:8000
+Usuário: airbyte
+Senha:   password
+```
+
+Ao fazer login pela primeira vez, o Airbyte solicitará um e-mail para cadastro. Utilize qualquer e-mail válido (não é necessário confirmar). Explore brevemente a interface, identificando as seções principais:
+
+| Seção | Descrição |
+|---|---|
+| **Sources** | Catálogo de conectores de origem (APIs, bancos de dados, arquivos) |
+| **Destinations** | Conectores de destino (Data Warehouses, Data Lakes, bancos de dados) |
+| **Connections** | Pipelines configurados (Source → Destination) com agendamento |
+| **Settings** | Configurações gerais, notificações e integrações |
+
+---
+
+### Passo 4 — Configuração do Destination: MinIO (S3-Compatível)
+
+Antes de criar a fonte de dados, configure o destino (MinIO) para que o Airbyte saiba onde gravar os dados extraídos.
+
+Na interface do Airbyte, navegue até **Destinations → New Destination** e pesquise por **"S3"**. Selecione o conector **Amazon S3** e preencha os campos conforme abaixo:
+
+| Campo | Valor |
+|---|---|
+| **Destination name** | `minio-bronze-local` |
+| **S3 Bucket Name** | `bronze` |
+| **S3 Bucket Path** | `airbyte/` |
+| **S3 Bucket Region** | `us-east-1` |
+| **Access Key ID** | `minioadmin` |
+| **Secret Access Key** | `minioadmin123` |
+| **S3 Endpoint** | `http://host.docker.internal:9000` |
+| **Output Format** | `Parquet — Apache Parquet columnar storage` |
+| **Compression Codec** | `SNAPPY` |
+| **S3 Path Format** | `${NAMESPACE}/${STREAM_NAME}/${YEAR}_${MONTH}_${DAY}_${EPOCH}_` | 
+
+> **Nota técnica:** O endereço `host.docker.internal` é utilizado porque o Airbyte roda dentro de contêineres Docker e precisa acessar o MinIO, que está em outro contêiner na mesma máquina. Em sistemas Linux, pode ser necessário adicionar `--add-host=host.docker.internal:host-gateway` ao `docker-compose.yaml` do Airbyte se a resolução falhar.
+
+Clique em **Test and Save**. O Airbyte criará um arquivo de teste no bucket `bronze` para validar a conexão. Se o teste passar, o destino está configurado corretamente.
+
+---
+
+### Passo 5 — Configuração da Source: REST Countries API
+
+Navegue até **Sources → New Source** e pesquise por **"REST Countries"** ou, alternativamente, utilize o conector genérico **"HTTP Request"** para maior flexibilidade.
+
+A API rest-countries agora exisge uma chave de autenticação que precisa ser obtida em:
+
+
+https://restcountries.com/apis
+
+
+Para usar o conector HTTP genérico, selecione **"Low-code CDK Connector"** ou **"Custom HTTP"** e configure:
+
+| Campo | Valor |
+|---|---|
+| **Source name** | `rest-countries-api` |
+| **API URL** | `https://api.restcountries.com/countries/v5?response_fields=names.common,codes.alpha_2,flag.emoji&pretty=1` |
+| **HTTP Method** | `GET` |
+| **Authentication** | `No Auth` |
+
+Clique em **Test and Save**. O Airbyte fará uma requisição de teste à API e exibirá uma amostra dos dados retornados — um array JSON com informações de todos os países do mundo.
+
+---
+
+### Passo 6 — Criação da Connection (Pipeline Completo)
+
+Antes de iniciar a configuração do pipeline é necessário criar uma chave de API para o airbyte em User->Applications, conforme imagem abaixo:
+
+![alt text](airbyte/image.png)
+
+Essa chave deverá ser fornecida na API Key do connector que será criado com Source e Destination configurados. Crie a conexão que define o pipeline de ingestão:
+
+1. Navegue até **Connections → New Connection**
+2. Selecione a source `rest-countries-api`
+3. Selecione o destination `minio-bronze-local`
+4. Configure os parâmetros da conexão:
+
+| Parâmetro | Valor | Justificativa |
+|---|---|---|
+| **Connection name** | `countries-to-bronze` | Nome descritivo do pipeline |
+| **Replication frequency** | `Manual` | Para controle manual durante o curso |
+| **Sync mode** | `Full Refresh — Overwrite` | Dados cadastrais raramente mudam |
+| **Namespace format** | `rest-countries-api` | Organiza os dados por namespace |
+
+5. Clique em **Set up connection**
+6. Execute a sincronização manualmente clicando em **Sync Now**
+
+---
+
+### Passo 7 — Verificação dos Dados no MinIO
+
+Após a sincronização concluir (status **Succeeded**), verifique os dados no MinIO:
+
+```bash
+# Listar os objetos criados pelo Airbyte no bucket bronze
+python3 - << 'EOF'
+import boto3
+
+client = boto3.client(
+    "s3",
+    endpoint_url="http://localhost:9000",
+    aws_access_key_id="minioadmin",
+    aws_secret_access_key="minioadmin123",
+    region_name="us-east-1",
+)
+
+response = client.list_objects_v2(Bucket="bronze", Prefix="airbyte/")
+objetos = response.get("Contents", [])
+
+print(f"Objetos criados pelo Airbyte no bucket bronze: {len(objetos)}")
+for obj in objetos:
+    tamanho_kb = obj["Size"] / 1024
+    print(f"  📄 {obj['Key']}  ({tamanho_kb:.1f} KB)")
+EOF
+```
+
+Você deve ver arquivos Parquet criados pelo Airbyte no caminho `bronze/airbyte/rest-countries-api/...`. Acesse também o console web do MinIO em `http://localhost:9001` para visualizar os arquivos graficamente.
+
+---
 
