@@ -1717,3 +1717,547 @@ print("=" * 65)
 ```bash
 python scripts/8_comparar_pipelines.py
 ```
+
+## Atividade 3 — Organização da Camada Bronze com Particionamento
+
+### Objetivo
+
+Implementar e consolidar as boas práticas de organização da camada Bronze: particionamento lógico por data de ingestão, convenção de nomenclatura de caminhos, adição de metadados de rastreabilidade e criação de um manifesto de ingestão que registra cada execução de pipeline. Estas práticas são fundamentais para a manutenibilidade e auditabilidade de Data Lakes em produção.
+
+### Contexto
+
+Em Data Lakes de produção com petabytes de dados, a organização dos arquivos no armazenamento de objetos tem impacto direto na performance de leitura e no custo de processamento. O **particionamento por data** (`ano=YYYY/mes=MM/dia=DD`) é o padrão mais comum porque a maioria das consultas analíticas filtra por período de tempo. Ferramentas como Apache Spark e DuckDB conseguem ignorar automaticamente partições que não correspondem ao filtro da consulta — uma técnica chamada **partition pruning** — reduzindo drasticamente a quantidade de dados lidos do disco.
+
+---
+
+### Passo 1 — Convenção de Nomenclatura para a Camada Bronze
+
+Antes de implementar o particionamento, é importante estabelecer e documentar a convenção de nomenclatura que será seguida em todo o curso. Crie o arquivo de documentação:
+
+```bash
+# Convenção de Nomenclatura — Camada Bronze
+
+## Estrutura de Caminhos
+
+bronze/
+└── {sistema_origem}/
+
+    └── {entidade}/
+
+        └── ano={YYYY}/
+
+            └── mes={MM}/
+
+                └── dia={DD}/
+
+                    └── {entidade}_{timestamp_unix}.parquet
+```
+
+## Exemplos
+
+```
+bronze/
+├── restcountries_api/
+│   └── countries/
+│       └── ano=2024/mes=01/dia=15/
+│           └── countries_1705363200.parquet
+├── pokeapi/
+│   └── pokemon/
+│       └── ano=2024/mes=01/dia=15/
+│           └── pokemon_1705363200.parquet
+└── ecommerce_db/
+    └── orders/
+        └── ano=2024/mes=01/dia=15/
+            └── orders_1705363200.parquet
+```
+
+## Regras
+
+1. Nomes em snake_case, letras minúsculas, sem espaços ou caracteres especiais.
+2. O timestamp no nome do arquivo é Unix timestamp (segundos desde epoch).
+3. Particionamento obrigatório por ano/mês/dia da DATA DE INGESTÃO (não da data do dado).
+4. Cada arquivo deve conter os metadados: _fonte, _ingerido_em, _versao_schema.
+5. Nunca sobrescrever arquivos existentes na camada Bronze — apenas acrescentar.
+
+
+---
+
+### Passo 2 — Classe Utilitária para Ingestão na Camada Bronze
+
+Crie uma classe reutilizável que encapsula todas as boas práticas de ingestão na camada Bronze. Esta classe será utilizada em todos os pipelines das aulas seguintes:
+
+```python
+# scripts/bronze_writer.py
+"""
+Utilitário para gravação padronizada na camada Bronze do Data Lake.
+
+Encapsula as boas práticas de:
+  - Particionamento por data de ingestão
+  - Adição de metadados de rastreabilidade
+  - Nomenclatura padronizada de arquivos
+  - Registro de manifesto de ingestão
+  - Verificação de integridade (contagem de registros)
+"""
+
+import pandas as pd
+import boto3
+import json
+import io
+import hashlib
+import logging
+from datetime import datetime, timezone
+from pathlib import PurePosixPath
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+
+class BronzeWriter:
+    """
+    Gerencia a gravação padronizada de dados na camada Bronze do Data Lake.
+
+    Uso:
+        writer = BronzeWriter()
+        resultado = writer.gravar(
+            df=meu_dataframe,
+            sistema_origem="pokeapi",
+            entidade="pokemon",
+        )
+        print(resultado["caminho_objeto"])
+    """
+
+    # Configurações padrão do MinIO local
+    ENDPOINT = "http://localhost:9000"
+    ACCESS_KEY = "minioadmin"
+    SECRET_KEY = "minioadmin123"
+    BUCKET = "bronze"
+
+    def __init__(
+        self,
+        endpoint: str = ENDPOINT,
+        access_key: str = ACCESS_KEY,
+        secret_key: str = SECRET_KEY,
+        bucket: str = BUCKET,
+    ):
+        self.bucket = bucket
+        self.client = boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            region_name="us-east-1",
+        )
+
+    def _construir_caminho(
+        self,
+        sistema_origem: str,
+        entidade: str,
+        timestamp: datetime,
+    ) -> str:
+        """
+        Constrói o caminho S3 seguindo a convenção de particionamento.
+
+        Exemplo de saída:
+            pokeapi/pokemon/ano=2024/mes=01/dia=15/pokemon_1705363200.parquet
+        """
+        particao = (
+            f"ano={timestamp.year}/"
+            f"mes={timestamp.month:02d}/"
+            f"dia={timestamp.day:02d}"
+        )
+        nome_arquivo = f"{entidade}_{int(timestamp.timestamp())}.parquet"
+        return str(PurePosixPath(sistema_origem) / entidade / particao / nome_arquivo)
+
+    def _adicionar_metadados(
+        self,
+        df: pd.DataFrame,
+        sistema_origem: str,
+        versao_schema: str,
+        timestamp: datetime,
+    ) -> pd.DataFrame:
+        """
+        Adiciona colunas de metadados de rastreabilidade ao DataFrame.
+        Estas colunas são prefixadas com '_' para diferenciá-las dos dados originais.
+        """
+        df = df.copy()
+        df["_fonte"] = sistema_origem
+        df["_ingerido_em"] = timestamp.isoformat()
+        df["_versao_schema"] = versao_schema
+        df["_particao_data"] = timestamp.strftime("%Y-%m-%d")
+        return df
+
+    def _calcular_checksum(self, buffer: bytes) -> str:
+        """Calcula o hash MD5 do arquivo para verificação de integridade."""
+        return hashlib.md5(buffer).hexdigest()
+
+    def gravar(
+        self,
+        df: pd.DataFrame,
+        sistema_origem: str,
+        entidade: str,
+        versao_schema: str = "1.0",
+        compressao: str = "snappy",
+        timestamp: Optional[datetime] = None,
+    ) -> dict:
+        """
+        Grava um DataFrame Pandas na camada Bronze do MinIO.
+
+        Args:
+            df:              DataFrame com os dados a serem gravados.
+            sistema_origem:  Identificador do sistema de origem (ex: 'pokeapi').
+            entidade:        Nome da entidade/tabela (ex: 'pokemon').
+            versao_schema:   Versão do schema dos dados (para controle de evolução).
+            compressao:      Algoritmo de compressão Parquet ('snappy' ou 'zstd').
+            timestamp:       Data/hora de ingestão. Se None, usa o momento atual.
+
+        Returns:
+            Dicionário com metadados da operação de gravação.
+        """
+        if timestamp is None:
+            timestamp = datetime.now(timezone.utc)
+
+        # Adicionar metadados de rastreabilidade
+        df_com_metadados = self._adicionar_metadados(
+            df, sistema_origem, versao_schema, timestamp
+        )
+
+        # Construir o caminho do objeto no MinIO
+        caminho_objeto = self._construir_caminho(sistema_origem, entidade, timestamp)
+
+        # Serializar para Parquet em memória
+        buffer = io.BytesIO()
+        df_com_metadados.to_parquet(buffer, index=False, compression=compressao)
+        buffer.seek(0)
+        dados_bytes = buffer.read()
+
+        # Calcular checksum para verificação de integridade
+        checksum = self._calcular_checksum(dados_bytes)
+
+        # Upload para o MinIO
+        self.client.put_object(
+            Bucket=self.bucket,
+            Key=caminho_objeto,
+            Body=dados_bytes,
+            ContentType="application/octet-stream",
+            Metadata={
+                "fonte": sistema_origem,
+                "entidade": entidade,
+                "registros": str(len(df)),
+                "checksum_md5": checksum,
+                "versao_schema": versao_schema,
+            },
+        )
+
+        resultado = {
+            "caminho_objeto": f"s3://{self.bucket}/{caminho_objeto}",
+            "registros": len(df),
+            "colunas": len(df_com_metadados.columns),
+            "tamanho_bytes": len(dados_bytes),
+            "checksum_md5": checksum,
+            "compressao": compressao,
+            "timestamp_ingestao": timestamp.isoformat(),
+        }
+
+        logger.info(
+            f"✅ Bronze gravado: {caminho_objeto} "
+            f"({resultado['registros']:,} registros, "
+            f"{resultado['tamanho_bytes'] / 1024:.1f} KB)"
+        )
+
+        return resultado
+
+    def registrar_manifesto(self, execucao: dict) -> None:
+        """
+        Registra um manifesto JSON com os metadados de cada execução de pipeline.
+        O manifesto é armazenado em bronze/_manifesto/ e serve como log de auditoria.
+        """
+        timestamp = datetime.now(timezone.utc)
+        chave_manifesto = (
+            f"_manifesto/"
+            f"ano={timestamp.year}/mes={timestamp.month:02d}/dia={timestamp.day:02d}/"
+            f"manifesto_{int(timestamp.timestamp())}.json"
+        )
+
+        self.client.put_object(
+            Bucket=self.bucket,
+            Key=chave_manifesto,
+            Body=json.dumps(execucao, indent=2, ensure_ascii=False, default=str),
+            ContentType="application/json",
+        )
+
+        logger.info(f"📋 Manifesto registrado: {chave_manifesto}")
+
+    def listar_particoes(self, sistema_origem: str, entidade: str) -> list:
+        """
+        Lista todas as partições disponíveis para uma entidade específica.
+        Útil para verificar a cobertura temporal dos dados na camada Bronze.
+        """
+        prefixo = f"{sistema_origem}/{entidade}/"
+        response = self.client.list_objects_v2(
+            Bucket=self.bucket, Prefix=prefixo, Delimiter="/"
+        )
+
+        particoes = []
+        # Navegar recursivamente pelas partições
+        for prefix in response.get("CommonPrefixes", []):
+            sub_response = self.client.list_objects_v2(
+                Bucket=self.bucket, Prefix=prefix["Prefix"], Delimiter="/"
+            )
+            for sub_prefix in sub_response.get("CommonPrefixes", []):
+                sub_sub_response = self.client.list_objects_v2(
+                    Bucket=self.bucket, Prefix=sub_prefix["Prefix"]
+                )
+                for obj in sub_sub_response.get("Contents", []):
+                    if obj["Key"].endswith(".parquet"):
+                        particoes.append({
+                            "caminho": obj["Key"],
+                            "tamanho_bytes": obj["Size"],
+                            "ultima_modificacao": obj["LastModified"],
+                        })
+
+        return particoes
+```
+
+
+---
+
+### Passo 3 — Reingesta com Particionamento Correto
+
+Utilize a classe `BronzeWriter` para reingerir os dados da REST Countries API e da PokeAPI, desta vez seguindo a convenção de particionamento padronizada:
+
+```python
+# scripts/9_reingerir_com_particionamento.py
+"""
+Demonstração do uso da classe BronzeWriter para ingestão padronizada.
+Reingestão dos dados de Countries e Pokémon com particionamento correto.
+
+REST Countries API v5 (a v3.1 foi descontinuada):
+  - Endereço: https://api.restcountries.com/countries/v5
+  - Autenticação obrigatória: cabeçalho "Authorization: Bearer <API_KEY>".
+    A chave é lida da variável de ambiente RESTCOUNTRIES_API_KEY:
+        PowerShell:   $env:RESTCOUNTRIES_API_KEY = "sua_chave"
+        Linux/macOS:  export RESTCOUNTRIES_API_KEY="sua_chave"
+  - Resposta embrulhada: registros em data.objects, paginação em data.meta.
+  - Paginação por limit/offset (máximo de 100 por página no plano gratuito).
+  - Seleção de campos com "response_fields" (caminhos com ponto).
+"""
+
+import sys
+import os
+sys.path.insert(0, os.path.dirname(__file__))
+
+# Usa o repositório de certificados do sistema operacional (redes com inspeção HTTPS).
+# Opcional: se o pacote não estiver instalado, segue com os certificados padrão do Python.
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
+
+import requests
+import pandas as pd
+import time
+from datetime import datetime, timezone
+from bronze_writer import BronzeWriter
+
+
+# ── Configuração da REST Countries API v5 ────────────────────────────────────
+RESTCOUNTRIES_BASE_URL = "https://api.restcountries.com"   # atenção: com "api."
+RESTCOUNTRIES_ENDPOINT = "/countries/v5"
+RESTCOUNTRIES_PAGINA = 100  # máximo permitido no plano gratuito
+
+# Equivalentes v5 dos campos usados na v3.1
+CAMPOS_COUNTRIES = [
+    "codes.alpha_2",                    # cca2
+    "names.common", "names.official",   # name.common / name.official
+    "region",
+    "continents",
+    "capitals",                         # capital
+    "currencies",
+    "population",
+    "area.kilometers",                  # area
+    "coordinates.lat", "coordinates.lng",  # latlng
+]
+
+
+def obter_api_key() -> str:
+    """Lê a API key da variável de ambiente (nunca escreva a chave no código)."""
+    api_key = os.getenv("RESTCOUNTRIES_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "Variável de ambiente RESTCOUNTRIES_API_KEY não definida.\n"
+            "Obtenha sua chave em https://restcountries.com e defina-a antes de executar:\n"
+            '  PowerShell: $env:RESTCOUNTRIES_API_KEY = "sua_chave"\n'
+            '  Linux/macOS: export RESTCOUNTRIES_API_KEY="sua_chave"'
+        )
+    return api_key
+
+
+def extrair_paises_v5() -> list[dict]:
+    """Extrai todos os países da REST Countries API v5, percorrendo as páginas."""
+    session = requests.Session()
+    session.headers.update({"Authorization": f"Bearer {obter_api_key()}"})
+
+    paises, offset = [], 0
+    while True:
+        resposta = session.get(
+            f"{RESTCOUNTRIES_BASE_URL}{RESTCOUNTRIES_ENDPOINT}",
+            params={
+                "response_fields": ",".join(CAMPOS_COUNTRIES),
+                "limit": RESTCOUNTRIES_PAGINA,
+                "offset": offset,
+            },
+            timeout=30,
+        )
+        resposta.raise_for_status()
+        dados = resposta.json()["data"]
+        pagina, meta = dados["objects"], dados["meta"]
+
+        paises.extend(pagina)
+        print(f"  Página offset={offset}: {len(pagina)} países (acumulado: {len(paises)}/{meta['total']})")
+
+        offset += RESTCOUNTRIES_PAGINA
+        if not pagina or not meta.get("more", offset < meta["total"]):
+            break
+        time.sleep(0.5)  # limite da API: 20 requisições a cada 10 segundos
+
+    return paises
+
+
+def capital_principal(capitais: list | None) -> str | None:
+    """Retorna a capital principal (attributes.primary) ou, na falta dela, a primeira da lista."""
+    if not capitais:
+        return None
+    principal = next(
+        (c for c in capitais if (c.get("attributes") or {}).get("primary")),
+        capitais[0],
+    )
+    return principal.get("name")
+
+
+writer = BronzeWriter()
+
+# ── 1. Reingestão da REST Countries API ──────────────────────────────────────
+print("\n" + "─" * 55)
+print("  Reingestão: REST Countries API v5 → Bronze (particionado)")
+print("─" * 55)
+
+paises_raw = extrair_paises_v5()
+
+# Normalizar os campos aninhados mantendo os MESMOS nomes de colunas da versão
+# anterior, para não quebrar os scripts e consultas que leem esta entidade.
+paises_normalizados = []
+for p in paises_raw:
+    codes = p.get("codes") or {}
+    names = p.get("names") or {}
+    area = p.get("area") or {}
+    coords = p.get("coordinates") or {}
+    paises_normalizados.append({
+        "cca2": codes.get("alpha_2"),
+        "nome_comum": names.get("common"),
+        "nome_oficial": names.get("official"),
+        "regiao": p.get("region"),
+        "continentes": p.get("continents"),
+        "moedas": p.get("currencies"),
+        "populacao": p.get("population"),
+        "area_km2": area.get("kilometers"),
+        "latlng": [coords.get("lat"), coords.get("lng")] if coords else None,
+        "capital": capital_principal(p.get("capitals")),
+    })
+
+df_countries = pd.DataFrame(paises_normalizados)
+
+resultado_countries = writer.gravar(
+    df=df_countries,
+    sistema_origem="restcountries_api",
+    entidade="countries",
+    versao_schema="2.0",  # origem mudou para a API v5 (mesmas colunas, nova procedência)
+)
+# Registrar manifesto
+writer.registrar_manifesto({
+    "pipeline": "rest_countries_bronze",
+    "api_versao": "v5",
+    "execucao_em": datetime.now(timezone.utc).isoformat(),
+    "resultado": resultado_countries,
+})
+
+print(f"  ✅ {resultado_countries['registros']} países gravados")
+print(f"  📍 {resultado_countries['caminho_objeto']}")
+
+# ── 2. Reingestão da PokeAPI (primeiros 50 pokémons) ─────────────────────────
+print("\n" + "─" * 55)
+print("  Reingestão: PokeAPI → Bronze (particionado)")
+print("─" * 55)
+
+BASE_URL = "https://pokeapi.co/api/v2"
+
+pokemon_lista = []
+
+# Buscar lista dos primeiros 50 pokémons
+resp_lista = requests.get(f"{BASE_URL}/pokemon?limit=50&offset=0", timeout=15)
+resp_lista.raise_for_status()
+
+for i, item in enumerate(resp_lista.json()["results"]):
+    resp_detalhe = requests.get(item["url"], timeout=10)
+    resp_detalhe.raise_for_status()
+    d = resp_detalhe.json()
+
+    pokemon_lista.append({
+        "id": d["id"],
+        "nome": d["name"],
+        "altura_dm": d["height"],
+        "peso_hg": d["weight"],
+        "experiencia_base": d.get("base_experience"),
+        "tipo_primario": d["types"][0]["type"]["name"] if d["types"] else None,
+        "tipo_secundario": d["types"][1]["type"]["name"] if len(d["types"]) > 1 else None,
+        "hp_base": next((s["base_stat"] for s in d["stats"] if s["stat"]["name"] == "hp"), None),
+        "ataque_base": next((s["base_stat"] for s in d["stats"] if s["stat"]["name"] == "attack"), None),
+        "defesa_base": next((s["base_stat"] for s in d["stats"] if s["stat"]["name"] == "defense"), None),
+        "sprite_url": d.get("sprites", {}).get("front_default"),
+    })
+
+    if (i + 1) % 10 == 0:
+        print(f"  Extraídos: {i + 1}/50 pokémons...")
+    time.sleep(0.1)
+
+df_pokemon = pd.DataFrame(pokemon_lista)
+
+resultado_pokemon = writer.gravar(
+    df=df_pokemon,
+    sistema_origem="pokeapi",
+    entidade="pokemon",
+    versao_schema="1.0",
+)
+
+writer.registrar_manifesto({
+    "pipeline": "pokeapi_bronze",
+    "execucao_em": datetime.now(timezone.utc).isoformat(),
+    "resultado": resultado_pokemon,
+})
+
+print(f"  ✅ {resultado_pokemon['registros']} pokémons gravados")
+print(f"  📍 {resultado_pokemon['caminho_objeto']}")
+
+# ── 3. Relatório final ────────────────────────────────────────────────────────
+print("\n" + "=" * 55)
+print("  RELATÓRIO FINAL — CAMADA BRONZE")
+print("=" * 55)
+
+for sistema, entidade in [("restcountries_api", "countries"), ("pokeapi", "pokemon")]:
+    particoes = writer.listar_particoes(sistema, entidade)
+    total_bytes = sum(p["tamanho_bytes"] for p in particoes)
+    print(f"\n  [{sistema}/{entidade}]")
+    print(f"    Arquivos:  {len(particoes)}")
+    print(f"    Tamanho:   {total_bytes / 1024:.1f} KB")
+    for p in particoes:
+        print(f"    📄 {p['caminho']}")
+
+print("\n  ✅ Camada Bronze organizada com particionamento correto!")
+print("  Acesse: http://localhost:9001/browser/bronze")
+```
+
+Execute o script:
+
+```bash
+python scripts/9_reingerir_com_particionamento.py
+```
