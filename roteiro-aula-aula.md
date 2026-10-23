@@ -2261,3 +2261,138 @@ Execute o script:
 ```bash
 python scripts/9_reingerir_com_particionamento.py
 ```
+
+### Passo 4 — Verificação do Manifesto de Ingestão
+
+O manifesto de ingestão é um registro de auditoria que documenta cada execução de pipeline. Verifique os manifestos criados:
+
+```python
+# scripts/10_verificar_manifesto.py
+"""
+Lê e exibe os manifestos de ingestão registrados na camada Bronze.
+O manifesto é a base para auditoria e rastreabilidade do Data Lake.
+"""
+
+import boto3
+import json
+
+client = boto3.client(
+    "s3",
+    endpoint_url="http://localhost:9000",
+    aws_access_key_id="minioadmin",
+    aws_secret_access_key="minioadmin123",
+    region_name="us-east-1",
+)
+
+response = client.list_objects_v2(Bucket="bronze", Prefix="_manifesto/")
+manifestos = sorted(
+    [obj["Key"] for obj in response.get("Contents", []) if obj["Key"].endswith(".json")],
+    reverse=True,  # Mais recentes primeiro
+)
+
+print(f"Manifestos de ingestão encontrados: {len(manifestos)}\n")
+
+for chave in manifestos[:5]:  # Exibir os 5 mais recentes
+    obj = client.get_object(Bucket="bronze", Key=chave)
+    manifesto = json.loads(obj["Body"].read().decode("utf-8"))
+    print(f"📋 {chave}")
+    print(f"   Pipeline:   {manifesto.get('pipeline')}")
+    print(f"   Executado:  {manifesto.get('execucao_em')}")
+    resultado = manifesto.get("resultado", {})
+    print(f"   Registros:  {resultado.get('registros', 'N/A'):,}")
+    print(f"   Tamanho:    {resultado.get('tamanho_bytes', 0) / 1024:.1f} KB")
+    print(f"   Checksum:   {resultado.get('checksum_md5', 'N/A')}")
+    print()
+```
+
+```bash
+python scripts/10_verificar_manifesto.py
+```
+
+---
+
+### Passo 5 — Leitura com Partition Pruning
+
+Demonstração de como o particionamento por data permite leituras eficientes, ignorando partições desnecessárias:
+
+```python
+# scripts/11_demonstrar_partition_pruning.py
+"""
+Demonstração do partition pruning: leitura eficiente de dados
+particionados sem carregar todas as partições disponíveis.
+"""
+
+import pandas as pd
+import boto3
+import io
+from datetime import datetime
+
+client = boto3.client(
+    "s3",
+    endpoint_url="http://localhost:9000",
+    aws_access_key_id="minioadmin",
+    aws_secret_access_key="minioadmin123",
+    region_name="us-east-1",
+)
+
+def ler_particao_especifica(
+    sistema: str,
+    entidade: str,
+    ano: int,
+    mes: int,
+    dia: int,
+) -> pd.DataFrame:
+    """
+    Lê apenas a partição correspondente à data especificada.
+    Ignora todas as outras partições — isso é o partition pruning.
+    """
+    prefixo = f"{sistema}/{entidade}/ano={ano}/mes={mes:02d}/dia={dia:02d}/"
+
+    response = client.list_objects_v2(Bucket="bronze", Prefix=prefixo)
+    arquivos = [
+        obj["Key"] for obj in response.get("Contents", [])
+        if obj["Key"].endswith(".parquet")
+    ]
+
+    if not arquivos:
+        print(f"  ⚠️  Nenhum dado encontrado para {prefixo}")
+        return pd.DataFrame()
+
+    # Ler apenas os arquivos da partição solicitada
+    frames = []
+    for chave in arquivos:
+        obj = client.get_object(Bucket="bronze", Key=chave)
+        frames.append(pd.read_parquet(io.BytesIO(obj["Body"].read())))
+
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+# Ler apenas a partição de hoje
+hoje = datetime.now()
+print(f"Lendo partição de hoje ({hoje.strftime('%Y-%m-%d')}):\n")
+
+df_countries_hoje = ler_particao_especifica(
+    "restcountries_api", "countries",
+    hoje.year, hoje.month, hoje.day
+)
+
+if not df_countries_hoje.empty:
+    print(f"  ✅ Countries: {len(df_countries_hoje)} registros carregados")
+    print(f"  Colunas de metadados: {[c for c in df_countries_hoje.columns if c.startswith('_')]}")
+    print(f"\n  Amostra dos dados:")
+    print(
+        df_countries_hoje[["nome_comum", "regiao", "populacao", "_ingerido_em"]]
+        .head(5)
+        .to_string(index=False)
+    )
+
+print("\n💡 Em um Data Lake com anos de dados históricos, a leitura")
+print("   com partition pruning evita varrer milhares de arquivos")
+print("   desnecessários, reduzindo custo e tempo de processamento.")
+```
+
+```bash
+python scripts/11_demonstrar_partition_pruning.py
+```
+
+---
