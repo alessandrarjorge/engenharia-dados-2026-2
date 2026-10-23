@@ -2471,7 +2471,7 @@ Acesse o Jupyter Lab em `http://localhost:8888` utilizando o token exibido no te
 
 ---
 
-### Passo 2 — Configuração da Sessão Spark com Conexão ao MinIO
+### Passo 2 — Configuração da Sessão Spark com Conexão ao MinIO - EM UM NOTEBOOK JUPYTERLAB
 
 A configuração do Spark para se conectar ao MinIO requer a especificação de pacotes adicionais (hadoop-aws e aws-java-sdk) e as credenciais de acesso S3. Execute as células abaixo no notebook:
 
@@ -2528,3 +2528,121 @@ print(f"\n   Spark UI disponível em: http://localhost:4040")
 > **Nota:** Na primeira execução, o Spark fará download dos pacotes `hadoop-aws` e `aws-java-sdk-bundle` (~150 MB). Esse processo pode levar alguns minutos. As execuções subsequentes utilizarão o cache local.
 
 ---
+
+### Passo 3 — Leitura de Dados Parquet do MinIO
+
+```python
+# Célula 2 — Leitura do dataset de e-commerce da camada Bronze
+import time
+
+# Caminho S3A para os arquivos Parquet no MinIO
+# O prefixo s3a:// indica o conector Hadoop para S3
+CAMINHO_ECOMMERCE = "s3a://bronze/ecommerce_sintetico/"
+
+print("Lendo dataset de e-commerce do MinIO...")
+inicio = time.time()
+
+df_pedidos = spark.read.parquet(CAMINHO_ECOMMERCE)
+
+# Nota: a leitura é LAZY — o Spark ainda não processou nenhum dado
+# O schema é inferido dos metadados do Parquet (sem ler os dados)
+duracao = time.time() - inicio
+
+print(f"✅ Schema inferido em {duracao:.2f}s (leitura lazy — dados ainda não carregados)")
+print(f"\nSchema do DataFrame:")
+df_pedidos.printSchema()
+```
+
+```python
+# Célula 3 — Primeira ação: contar registros (força a execução do plano)
+print("Contando registros (primeira ação — força execução do plano Spark)...")
+inicio = time.time()
+
+total_registros = df_pedidos.count()
+
+duracao = time.time() - inicio
+print(f"✅ Total de registros: {total_registros:,}")
+print(f"   Tempo de execução: {duracao:.2f}s")
+print(f"\n   Acesse o Spark UI em http://localhost:4040 para ver o plano de execução!")
+```
+
+```python
+# Célula 4 — Exploração inicial do DataFrame
+# show() é uma ação que força a execução e exibe os dados
+print("Amostra dos dados (5 primeiras linhas):")
+df_pedidos.show(5, truncate=False)
+
+print(f"\nEstatísticas descritivas das colunas numéricas:")
+df_pedidos.select(
+    "valor_unitario", "quantidade", "valor_total"
+).describe().show()
+```
+---
+
+### Passo 4 — Operações Fundamentais de DataFrame
+
+```python
+# Célula 5 — Filtros e Seleções (equivalente ao WHERE e SELECT do SQL)
+
+# Filtrar apenas pedidos concluidos com valor total acima de R$ 500
+df_pedidos_premium = (
+    df_pedidos
+    .filter(
+        (F.col("status_pedido") == "concluido") &
+        (F.col("valor_total") > 500.0)
+    )
+    .select(
+        "id_pedido",
+        "id_cliente",
+        "categoria",
+        "valor_total",
+        "regiao",
+        "data_pedido",
+    )
+)
+
+print("Pedidos concluidos com valor > R$ 500:")
+print(f"  Total filtrado: {df_pedidos_premium.count():,} registros")
+df_pedidos_premium.show(5)
+```
+
+```python
+# Célula 6 — Agrupamentos e Agregações (equivalente ao GROUP BY do SQL)
+
+# Receita total e ticket médio por categoria e região
+df_receita_categoria = (
+    df_pedidos
+    .filter(F.col("status_pedido") == "concluido")
+    .groupBy("categoria", "regiao")
+    .agg(
+        F.count("id_pedido").alias("total_pedidos"),
+        F.sum("valor_total").alias("receita_total"),
+        F.avg("valor_total").alias("ticket_medio"),
+        F.countDistinct("id_cliente").alias("clientes_unicos"),
+    )
+    .withColumn("receita_total", F.round("receita_total", 2))
+    .withColumn("ticket_medio", F.round("ticket_medio", 2))
+    .orderBy(F.desc("receita_total"))
+)
+
+print("Receita por Categoria e Região (pedidos concluidos):")
+df_receita_categoria.show(15)
+```
+
+```python
+# Célula 7 — Funções de Janela (Window Functions)
+# Calcular o ranking de receita por categoria dentro de cada região
+from pyspark.sql.window import Window
+
+janela_regiao = Window.partitionBy("regiao").orderBy(F.desc("receita_total"))
+
+df_ranking = (
+    df_receita_categoria
+    .withColumn("ranking_na_regiao", F.rank().over(janela_regiao))
+    .filter(F.col("ranking_na_regiao") <= 3)  # Top 3 categorias por região
+    .orderBy("regiao", "ranking_na_regiao")
+)
+
+print("Top 3 categorias por receita em cada região:")
+df_ranking.show(20)
+```
