@@ -2565,3 +2565,84 @@ print(f"✅ Total de registros: {total_registros:,}")
 print(f"   Tempo de execução: {duracao:.2f}s")
 print(f"\n   Acesse o Spark UI em http://localhost:4040 para ver o plano de execução!")
 ```
+
+```python
+# Célula 4 — Exploração inicial do DataFrame
+# show() é uma ação que força a execução e exibe os dados
+print("Amostra dos dados (5 primeiras linhas):")
+df_pedidos.show(5, truncate=False)
+
+print(f"\nEstatísticas descritivas das colunas numéricas:")
+df_pedidos.select(
+    "valor_unitario", "quantidade", "valor_total"
+).describe().show()
+```
+---
+
+### Passo 4 — Operações Fundamentais de DataFrame
+
+```python
+# Célula 5 — Filtros e Seleções (equivalente ao WHERE e SELECT do SQL)
+
+# Filtrar apenas pedidos concluidos com valor total acima de R$ 500
+df_pedidos_premium = (
+    df_pedidos
+    .filter(
+        (F.col("status_pedido") == "concluido") &
+        (F.col("valor_total") > 500.0)
+    )
+    .select(
+        "id_pedido",
+        "id_cliente",
+        "categoria",
+        "valor_total",
+        "regiao",
+        "data_pedido",
+    )
+)
+
+print("Pedidos concluidos com valor > R$ 500:")
+print(f"  Total filtrado: {df_pedidos_premium.count():,} registros")
+df_pedidos_premium.show(5)
+```
+
+```python
+# Célula 6 — Agrupamentos e Agregações (equivalente ao GROUP BY do SQL)
+
+# Receita total e ticket médio por categoria e região
+df_receita_categoria = (
+    df_pedidos
+    .filter(F.col("status_pedido") == "concluido")
+    .groupBy("categoria", "regiao")
+    .agg(
+        F.count("id_pedido").alias("total_pedidos"),
+        F.sum("valor_total").alias("receita_total"),
+        F.avg("valor_total").alias("ticket_medio"),
+        F.countDistinct("id_cliente").alias("clientes_unicos"),
+    )
+    .withColumn("receita_total", F.round("receita_total", 2))
+    .withColumn("ticket_medio", F.round("ticket_medio", 2))
+    .orderBy(F.desc("receita_total"))
+)
+
+print("Receita por Categoria e Região (pedidos concluidos):")
+df_receita_categoria.show(15)
+```
+
+```python
+# Célula 7 — Funções de Janela (Window Functions)
+# Calcular o ranking de receita por categoria dentro de cada região
+from pyspark.sql.window import Window
+
+janela_regiao = Window.partitionBy("regiao").orderBy(F.desc("receita_total"))
+
+df_ranking = (
+    df_receita_categoria
+    .withColumn("ranking_na_regiao", F.rank().over(janela_regiao))
+    .filter(F.col("ranking_na_regiao") <= 3)  # Top 3 categorias por região
+    .orderBy("regiao", "ranking_na_regiao")
+)
+
+print("Top 3 categorias por receita em cada região:")
+df_ranking.show(20)
+```
