@@ -2471,7 +2471,7 @@ Acesse o Jupyter Lab em `http://localhost:8888` utilizando o token exibido no te
 
 ---
 
-### Passo 2 — Configuração da Sessão Spark com Conexão ao MinIO
+### Passo 2 — Configuração da Sessão Spark com Conexão ao MinIO - EM UM NOTEBOOK JUPYTERLAB
 
 A configuração do Spark para se conectar ao MinIO requer a especificação de pacotes adicionais (hadoop-aws e aws-java-sdk) e as credenciais de acesso S3. Execute as células abaixo no notebook:
 
@@ -2528,3 +2528,40 @@ print(f"\n   Spark UI disponível em: http://localhost:4040")
 > **Nota:** Na primeira execução, o Spark fará download dos pacotes `hadoop-aws` e `aws-java-sdk-bundle` (~150 MB). Esse processo pode levar alguns minutos. As execuções subsequentes utilizarão o cache local.
 
 ---
+
+### Passo 3 — Leitura de Dados Parquet do MinIO
+
+```python
+# Célula 2 — Leitura do dataset de e-commerce da camada Bronze
+import time
+
+# Caminho S3A para os arquivos Parquet no MinIO
+# O prefixo s3a:// indica o conector Hadoop para S3
+CAMINHO_ECOMMERCE = "s3a://bronze/ecommerce_sintetico/"
+
+print("Lendo dataset de e-commerce do MinIO...")
+inicio = time.time()
+
+df_pedidos = spark.read.parquet(CAMINHO_ECOMMERCE)
+
+# Nota: a leitura é LAZY — o Spark ainda não processou nenhum dado
+# O schema é inferido dos metadados do Parquet (sem ler os dados)
+duracao = time.time() - inicio
+
+print(f"✅ Schema inferido em {duracao:.2f}s (leitura lazy — dados ainda não carregados)")
+print(f"\nSchema do DataFrame:")
+df_pedidos.printSchema()
+```
+
+```python
+# Célula 3 — Primeira ação: contar registros (força a execução do plano)
+print("Contando registros (primeira ação — força execução do plano Spark)...")
+inicio = time.time()
+
+total_registros = df_pedidos.count()
+
+duracao = time.time() - inicio
+print(f"✅ Total de registros: {total_registros:,}")
+print(f"   Tempo de execução: {duracao:.2f}s")
+print(f"\n   Acesse o Spark UI em http://localhost:4040 para ver o plano de execução!")
+```
