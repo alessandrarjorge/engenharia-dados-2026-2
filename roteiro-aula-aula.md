@@ -2261,3 +2261,270 @@ Execute o script:
 ```bash
 python scripts/9_reingerir_com_particionamento.py
 ```
+
+### Passo 4 — Verificação do Manifesto de Ingestão
+
+O manifesto de ingestão é um registro de auditoria que documenta cada execução de pipeline. Verifique os manifestos criados:
+
+```python
+# scripts/10_verificar_manifesto.py
+"""
+Lê e exibe os manifestos de ingestão registrados na camada Bronze.
+O manifesto é a base para auditoria e rastreabilidade do Data Lake.
+"""
+
+import boto3
+import json
+
+client = boto3.client(
+    "s3",
+    endpoint_url="http://localhost:9000",
+    aws_access_key_id="minioadmin",
+    aws_secret_access_key="minioadmin123",
+    region_name="us-east-1",
+)
+
+response = client.list_objects_v2(Bucket="bronze", Prefix="_manifesto/")
+manifestos = sorted(
+    [obj["Key"] for obj in response.get("Contents", []) if obj["Key"].endswith(".json")],
+    reverse=True,  # Mais recentes primeiro
+)
+
+print(f"Manifestos de ingestão encontrados: {len(manifestos)}\n")
+
+for chave in manifestos[:5]:  # Exibir os 5 mais recentes
+    obj = client.get_object(Bucket="bronze", Key=chave)
+    manifesto = json.loads(obj["Body"].read().decode("utf-8"))
+    print(f"📋 {chave}")
+    print(f"   Pipeline:   {manifesto.get('pipeline')}")
+    print(f"   Executado:  {manifesto.get('execucao_em')}")
+    resultado = manifesto.get("resultado", {})
+    print(f"   Registros:  {resultado.get('registros', 'N/A'):,}")
+    print(f"   Tamanho:    {resultado.get('tamanho_bytes', 0) / 1024:.1f} KB")
+    print(f"   Checksum:   {resultado.get('checksum_md5', 'N/A')}")
+    print()
+```
+
+```bash
+python scripts/10_verificar_manifesto.py
+```
+
+---
+
+### Passo 5 — Leitura com Partition Pruning
+
+Demonstração de como o particionamento por data permite leituras eficientes, ignorando partições desnecessárias:
+
+```python
+# scripts/11_demonstrar_partition_pruning.py
+"""
+Demonstração do partition pruning: leitura eficiente de dados
+particionados sem carregar todas as partições disponíveis.
+"""
+
+import pandas as pd
+import boto3
+import io
+from datetime import datetime
+
+client = boto3.client(
+    "s3",
+    endpoint_url="http://localhost:9000",
+    aws_access_key_id="minioadmin",
+    aws_secret_access_key="minioadmin123",
+    region_name="us-east-1",
+)
+
+def ler_particao_especifica(
+    sistema: str,
+    entidade: str,
+    ano: int,
+    mes: int,
+    dia: int,
+) -> pd.DataFrame:
+    """
+    Lê apenas a partição correspondente à data especificada.
+    Ignora todas as outras partições — isso é o partition pruning.
+    """
+    prefixo = f"{sistema}/{entidade}/ano={ano}/mes={mes:02d}/dia={dia:02d}/"
+
+    response = client.list_objects_v2(Bucket="bronze", Prefix=prefixo)
+    arquivos = [
+        obj["Key"] for obj in response.get("Contents", [])
+        if obj["Key"].endswith(".parquet")
+    ]
+
+    if not arquivos:
+        print(f"  ⚠️  Nenhum dado encontrado para {prefixo}")
+        return pd.DataFrame()
+
+    # Ler apenas os arquivos da partição solicitada
+    frames = []
+    for chave in arquivos:
+        obj = client.get_object(Bucket="bronze", Key=chave)
+        frames.append(pd.read_parquet(io.BytesIO(obj["Body"].read())))
+
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+# Ler apenas a partição de hoje
+hoje = datetime.now()
+print(f"Lendo partição de hoje ({hoje.strftime('%Y-%m-%d')}):\n")
+
+df_countries_hoje = ler_particao_especifica(
+    "restcountries_api", "countries",
+    hoje.year, hoje.month, hoje.day
+)
+
+if not df_countries_hoje.empty:
+    print(f"  ✅ Countries: {len(df_countries_hoje)} registros carregados")
+    print(f"  Colunas de metadados: {[c for c in df_countries_hoje.columns if c.startswith('_')]}")
+    print(f"\n  Amostra dos dados:")
+    print(
+        df_countries_hoje[["nome_comum", "regiao", "populacao", "_ingerido_em"]]
+        .head(5)
+        .to_string(index=False)
+    )
+
+print("\n💡 Em um Data Lake com anos de dados históricos, a leitura")
+print("   com partition pruning evita varrer milhares de arquivos")
+print("   desnecessários, reduzindo custo e tempo de processamento.")
+```
+
+```bash
+python scripts/11_demonstrar_partition_pruning.py
+```
+
+---
+
+## Processamento Distribuído e Formatos de Tabela (Lakehouse)
+
+**Pré-requisitos:** Conclusão das Atividades 1 e 2 — ambiente Docker operacional, MinIO rodando com dados da REST Countries API, PokeAPI e dataset sintético de e-commerce na camada Bronze.
+
+---
+
+## Visão Geral das Atividades
+
+Esta aula marca a transição do paradigma de armazenamento para o de **processamento**. Os dados que foram ingeridos e preservados na camada Bronze nas aulas anteriores agora serão lidos, processados e transformados por dois motores analíticos complementares. A **Atividade 1** introduz o Apache Spark — o motor de processamento distribuído padrão da indústria — demonstrando como ele lê dados diretamente do MinIO e executa operações de DataFrame em escala. A **Atividade 2** apresenta o DuckDB, um motor OLAP in-process que executa SQL analítico de alta performance diretamente sobre arquivos Parquet, sem necessidade de servidor. A **Atividade 3** eleva o Data Lake ao nível de **Data Lakehouse**, convertendo os dados para o formato Apache Iceberg e demonstrando na prática as transações ACID, evolução de schema e *time travel* — funcionalidades que antes eram exclusivas de bancos de dados relacionais.
+
+| Atividade | Tema | Duração Estimada | Ferramentas |
+|---|---|---|---|
+| 1 | Introdução ao PySpark com MinIO | 45 min | PySpark 3.5, Docker, MinIO, Jupyter |
+| 2 | Consultas Analíticas com DuckDB | 35 min | DuckDB, Python, SQL, MinIO |
+| 3 | Data Lakehouse com Apache Iceberg | 40 min | PyIceberg, DuckDB, MinIO, Python |
+
+> **Contexto arquitetural:** As três atividades desta aula operam sobre a camada Bronze (leitura) e produzem resultados que serão a base da camada Silver. O processamento realizado aqui é exploratório e de validação — a transformação definitiva e documentada para a camada Silver ocorrerá na Aula 4 com o dbt.
+
+---
+
+## Atividade 1 — Introdução ao PySpark com MinIO
+
+### Objetivo
+
+Configurar um ambiente Apache Spark local via Docker, conectá-lo ao MinIO como fonte de dados S3-compatível e executar as operações fundamentais de DataFrame em PySpark: leitura de Parquet, filtros, seleções, agrupamentos, joins e gravação de resultados. O dataset de e-commerce sintético gerado na Aula 1 (1 milhão de registros) será utilizado para demonstrar o poder do processamento distribuído.
+
+### Contexto
+
+O Apache Spark é o motor de processamento distribuído mais amplamente utilizado na indústria para cargas de trabalho de Big Data. Sua arquitetura divide os dados em partições que são processadas em paralelo por múltiplos executores (workers), permitindo escalar horizontalmente para petabytes de dados. Mesmo em modo local (single-node), o Spark demonstra ganhos de performance sobre o Pandas para datasets acima de alguns gigabytes, pois utiliza todos os núcleos de CPU disponíveis e executa operações de forma lazy (avaliação preguiçosa) — construindo um plano de execução otimizado antes de processar qualquer dado.
+
+---
+
+### Passo 1 — Configuração do PySpark via Docker
+
+O Spark requer a JVM (Java Virtual Machine) e configurações específicas para se conectar ao MinIO. A forma mais simples de ter um ambiente Spark funcional é utilizando a imagem oficial do Jupyter com PySpark pré-instalado:
+
+```bash
+cd ~/engenharia-dados-curso/docker
+
+# Adicionar o serviço Spark/Jupyter ao docker-compose.yml existente
+cat >> docker-compose.yml << 'EOF'
+
+  # Jupyter com PySpark e suporte a S3 (MinIO)
+  spark-jupyter:
+    image: jupyter/pyspark-notebook:spark-3.5.0
+    container_name: spark-jupyter
+    ports:
+      - "8888:8888"   # Interface Jupyter
+      - "4040:4040"   # Spark UI (monitoramento de jobs)
+    environment:
+      JUPYTER_ENABLE_LAB: "yes"
+      SPARK_OPTS: "--driver-java-options=-Xms1g --driver-java-options=-Xmx4g"
+    volumes:
+      - ../notebooks:/home/jovyan/notebooks
+      - ../scripts:/home/jovyan/scripts
+      - ../data:/home/jovyan/data
+    networks:
+      - default
+EOF
+
+# Iniciar o serviço Spark/Jupyter
+docker compose up -d spark-jupyter
+
+# Aguardar a inicialização (pode levar 1-2 minutos)
+sleep 30
+
+# Obter o token de acesso do Jupyter
+docker logs spark-jupyter 2>&1 | grep "token=" | tail -1
+```
+
+Acesse o Jupyter Lab em `http://localhost:8888` utilizando o token exibido no terminal. Crie um novo notebook em `notebooks/` com o nome `aula3_pyspark.ipynb`.
+
+---
+
+### Passo 2 — Configuração da Sessão Spark com Conexão ao MinIO
+
+A configuração do Spark para se conectar ao MinIO requer a especificação de pacotes adicionais (hadoop-aws e aws-java-sdk) e as credenciais de acesso S3. Execute as células abaixo no notebook:
+
+```python
+# Célula 1 — Configuração da SparkSession com suporte ao MinIO
+import os
+from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    StructType, StructField, StringType, IntegerType,
+    DoubleType, TimestampType
+)
+
+# Endereço do MinIO acessível de dentro do contêiner Docker
+# "host.docker.internal" resolve para o IP do host a partir do contêiner
+MINIO_ENDPOINT = "http://host.docker.internal:9000"
+MINIO_ACCESS_KEY = "minioadmin"
+MINIO_SECRET_KEY = "minioadmin123"
+
+# Criar a SparkSession com os pacotes necessários para S3
+spark = (
+    SparkSession.builder
+    .appName("DataEngineeringCourse-Aula3")
+    .master("local[*]")  # Usar todos os núcleos de CPU disponíveis
+    .config(
+        "spark.jars.packages",
+        "org.apache.hadoop:hadoop-aws:3.3.4,"
+        "com.amazonaws:aws-java-sdk-bundle:1.12.262"
+    )
+    # Configurações do conector S3A para MinIO
+    .config("spark.hadoop.fs.s3a.endpoint", MINIO_ENDPOINT)
+    .config("spark.hadoop.fs.s3a.access.key", MINIO_ACCESS_KEY)
+    .config("spark.hadoop.fs.s3a.secret.key", MINIO_SECRET_KEY)
+    .config("spark.hadoop.fs.s3a.path.style.access", "true")
+    .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+    .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false")
+    # Otimizações de performance
+    .config("spark.sql.adaptive.enabled", "true")
+    .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+    .config("spark.ui.port", "4040")
+    .getOrCreate()
+)
+
+# Configurar nível de log para reduzir verbosidade
+spark.sparkContext.setLogLevel("WARN")
+
+print(f"✅ SparkSession criada com sucesso!")
+print(f"   Versão do Spark: {spark.version}")
+print(f"   Master: {spark.sparkContext.master}")
+print(f"   Núcleos disponíveis: {spark.sparkContext.defaultParallelism}")
+print(f"\n   Spark UI disponível em: http://localhost:4040")
+```
+
+> **Nota:** Na primeira execução, o Spark fará download dos pacotes `hadoop-aws` e `aws-java-sdk-bundle` (~150 MB). Esse processo pode levar alguns minutos. As execuções subsequentes utilizarão o cache local.
+
+---
