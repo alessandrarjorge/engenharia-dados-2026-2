@@ -2646,3 +2646,107 @@ df_ranking = (
 print("Top 3 categorias por receita em cada região:")
 df_ranking.show(20)
 ```
+
+```python
+# Célula 8 — Criação de Colunas Derivadas e Transformações
+
+df_enriquecido = (
+    df_pedidos
+    .withColumn(
+        # Extrair o mês da data do pedido
+        "mes_pedido", F.month("data_pedido")
+    )
+    .withColumn(
+        # Extrair o ano
+        "ano_pedido", F.year("data_pedido")
+    )
+    .withColumn(
+        # Classificar o pedido por faixa de valor
+        "faixa_valor",
+        F.when(F.col("valor_total") < 100, "Baixo")
+         .when(F.col("valor_total") < 500, "Médio")
+         .when(F.col("valor_total") < 1500, "Alto")
+         .otherwise("Premium")
+    )
+    .withColumn(
+        # Flag para pedidos com avaliação positiva (4 ou 5 estrelas)
+        "avaliacao_positiva",
+        F.when(F.col("avaliacao_cliente") >= 4, True).otherwise(False)
+    )
+)
+
+print("DataFrame enriquecido com colunas derivadas:")
+df_enriquecido.select(
+    "id_pedido", "valor_total", "faixa_valor",
+    "mes_pedido", "ano_pedido", "avaliacao_positiva"
+).show(10)
+```
+
+---
+
+### Passo 5 — Plano de Execução e Otimização
+
+```python
+# Célula 9 — Visualização do Plano de Execução (Catalyst Optimizer)
+# O Spark usa o Catalyst Optimizer para transformar o plano lógico
+# em um plano físico otimizado antes de executar qualquer operação.
+
+print("=== Plano de Execução Lógico (não otimizado) ===")
+df_receita_categoria.explain(mode="simple")
+
+print("\n=== Plano de Execução Físico (otimizado pelo Catalyst) ===")
+df_receita_categoria.explain(mode="cost")
+```
+
+```python
+# Célula 10 — Cache de DataFrames para Reutilização
+# Quando um DataFrame é usado múltiplas vezes, o cache evita
+# que o Spark releia os dados do MinIO a cada operação.
+
+print("Armazenando DataFrame em cache...")
+inicio = time.time()
+df_pedidos.cache()
+df_pedidos.count()  # Força a materialização do cache
+duracao_cache = time.time() - inicio
+print(f"  Cache materializado em {duracao_cache:.2f}s")
+
+# Segunda contagem — agora vem do cache (muito mais rápida)
+inicio = time.time()
+df_pedidos.count()
+duracao_cache_hit = time.time() - inicio
+print(f"  Leitura do cache: {duracao_cache_hit:.4f}s")
+print(f"  Speedup: {duracao_cache / duracao_cache_hit:.0f}x mais rápido com cache")
+```
+
+---
+
+### Passo 6 — Gravação dos Resultados no MinIO
+
+```python
+# Célula 11 — Gravação do resultado processado de volta no MinIO
+# Os resultados são gravados como Parquet particionado por categoria
+
+CAMINHO_SAIDA = "s3a://bronze/ecommerce_processado/"
+
+print(f"Gravando resultados em: {CAMINHO_SAIDA}")
+inicio = time.time()
+
+(
+    df_enriquecido
+    .filter(F.col("status_pedido") == "concluido")
+    .write
+    .mode("overwrite")
+    .partitionBy("ano_pedido", "mes_pedido")  # Particionamento físico no S3
+    .parquet(CAMINHO_SAIDA)
+)
+
+duracao = time.time() - inicio
+print(f"✅ Dados gravados em {duracao:.2f}s")
+print(f"   Particionado por: ano_pedido / mes_pedido")
+print(f"   Formato: Parquet + Snappy (padrão do Spark)")
+
+# Verificar os arquivos criados
+df_verificacao = spark.read.parquet(CAMINHO_SAIDA)
+print(f"\n   Registros gravados: {df_verificacao.count():,}")
+print(f"   Partições físicas criadas:")
+df_verificacao.select("ano_pedido", "mes_pedido").distinct().orderBy("ano_pedido", "mes_pedido").show(5)
