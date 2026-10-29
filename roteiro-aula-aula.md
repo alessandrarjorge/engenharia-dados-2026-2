@@ -1,4 +1,4 @@
-# Aula 1 — Atividades Práticas
+# Tema 1 — Atividades Práticas - Ingestão de Dados
 ## Engenharia de Dados com Ferramentas Open Source
 
 **Curso:** Engenharia de Dados com Ferramentas Open Source
@@ -947,9 +947,9 @@ As três atividades a seguir constroem os primeiros pipelines de ingestão reais
 
 | Atividade | Tema | Duração Estimada | Ferramentas |
 |---|---|---|---|
-| 1 | Configuração do Airbyte e Criação de Conexões | 50 min | Docker Compose, Airbyte OSS |
-| 2 | Pipeline de Ingestão com `dlt` + APIs Públicas | 60 min | Python, `dlt`, REST Countries API, PokeAPI |
-| 3 | Organização da Camada Bronze com Particionamento | 40 min | Python, `boto3`, Parquet, MinIO |
+| 4 | Configuração do Airbyte e Criação de Conexões | 50 min | Docker Compose, Airbyte OSS |
+| 5 | Pipeline de Ingestão com `dlt` + APIs Públicas | 60 min | Python, `dlt`, REST Countries API, PokeAPI |
+| 6 | Organização da Camada Bronze com Particionamento | 40 min | Python, `boto3`, Parquet, MinIO |
 
 > **Regra de ouro da camada Bronze:** dados ingeridos nesta camada nunca devem ser alterados após a gravação. O objetivo é preservar o dado exatamente como veio da fonte, acrescentando apenas metadados de rastreabilidade (timestamp de ingestão, nome da fonte, versão do schema). Qualquer transformação, limpeza ou enriquecimento ocorre exclusivamente nas camadas Silver e Gold.
 
@@ -1718,7 +1718,7 @@ print("=" * 65)
 python scripts/8_comparar_pipelines.py
 ```
 
-## Atividade 3 — Organização da Camada Bronze com Particionamento
+## Atividade 6 — Organização da Camada Bronze com Particionamento
 
 ### Objetivo
 
@@ -2397,7 +2397,7 @@ python scripts/11_demonstrar_partition_pruning.py
 
 ---
 
-## Processamento Distribuído e Formatos de Tabela (Lakehouse)
+## Tema 2 - Processamento Distribuído e Formatos de Tabela (Lakehouse)
 
 **Pré-requisitos:** Conclusão das Atividades 1 e 2 — ambiente Docker operacional, MinIO rodando com dados da REST Countries API, PokeAPI e dataset sintético de e-commerce na camada Bronze.
 
@@ -2750,3 +2750,4 @@ df_verificacao = spark.read.parquet(CAMINHO_SAIDA)
 print(f"\n   Registros gravados: {df_verificacao.count():,}")
 print(f"   Partições físicas criadas:")
 df_verificacao.select("ano_pedido", "mes_pedido").distinct().orderBy("ano_pedido", "mes_pedido").show(5)
+
