@@ -2397,7 +2397,7 @@ python scripts/11_demonstrar_partition_pruning.py
 
 ---
 
-## Tema 2 - Processamento Distribuído e Formatos de Tabela (Lakehouse)
+# Tema 2 - Processamento Distribuído e Formatos de Tabela (Lakehouse)
 
 **Pré-requisitos:** Conclusão das Atividades 1 e 2 — ambiente Docker operacional, MinIO rodando com dados da REST Countries API, PokeAPI e dataset sintético de e-commerce na camada Bronze.
 
@@ -2750,4 +2750,324 @@ df_verificacao = spark.read.parquet(CAMINHO_SAIDA)
 print(f"\n   Registros gravados: {df_verificacao.count():,}")
 print(f"   Partições físicas criadas:")
 df_verificacao.select("ano_pedido", "mes_pedido").distinct().orderBy("ano_pedido", "mes_pedido").show(5)
+```
+
+---
+# Tema 3 — Lakehouse na prática e Camada Silver com dbt
+
+## Atividade 0 - aula de 29/10/2026
+
+| Atividade | Tema | Duração | Ferramentas |
+|---|---|---|---|
+| 0 | Ajuste do ambiente e correção da conexão DuckDB↔MinIO | 10 min | DuckDB, PowerShell |
+| 1 | Apache Iceberg: snapshots, *time travel*, DELETE/UPSERT, evolução de schema | 45 min | PyIceberg, DuckDB, MinIO |
+| 2 | Projeto dbt e modelos *staging* (Camada Silver) | 40 min | dbt-core, dbt-duckdb |
+| 3 | Modelos *intermediate*: deduplicação, enriquecimento e segmentação | 25 min | dbt, macros Jinja |
+
+---
+
+## Atividade 0 — Ajuste do Ambiente
+
+### Passo 1 — Ativar o ambiente e alinhar versões
+
+```powershell
+cd ~/engenharia-dados-2026-2
+.\.venv\Scripts\Activate.ps1          # Linux/macOS: source .venv/bin/activate
+
+# Mantém DuckDB < 2.0 (exigência do pyiceberg[duckdb]) e instala o catálogo SQL
+pip install "duckdb>=1.4,<2" "pyiceberg[sql-sqlite,pyarrow,pandas,duckdb]>=0.10" boto3
+
+python -c "import duckdb, pyiceberg; print(duckdb.__version__, pyiceberg.__version__)"
+```
+
+### Passo 2 — Conexão DuckDB↔MinIO com `CREATE SECRET`
+
+Crie um novo notebook `notebooks/2_iceberg.ipynb`.
+
+A forma recomendada no DuckDB atual é o **gerenciador de segredos**.
+
+```python
+# Célula 1 (revisada) — DuckDB + MinIO com Secrets Manager
+import duckdb
+
+con = duckdb.connect("../data/curso_analytics.duckdb")
+con.execute("INSTALL httpfs; LOAD httpfs;")
+
+# Segredo TEMPORÁRIO: vale para esta conexão. Rode esta célula sempre que reabrir o notebook.
+con.execute("""
+    CREATE OR REPLACE SECRET minio (
+        TYPE s3,
+        KEY_ID 'minioadmin',
+        SECRET 'minioadmin123',
+        ENDPOINT 'localhost:9000',
+        URL_STYLE 'path',
+        USE_SSL false,
+        REGION 'us-east-1'
+    );
+""")
+print(con.sql("SELECT name, type, persistent FROM duckdb_secrets()"))
+```
+
+## Atividade 1 — Apache Iceberg na Prática (continuação)
+
+### Objetivo
+
+Concluir a conversão da Bronze para uma tabela Iceberg e demonstrar, com operações reais, as garantias do Lakehouse: snapshots imutáveis, *time travel*, exclusão e *upsert* transacionais (caso LGPD), evolução de schema sem reescrita e leitura por outro motor (DuckDB).
+
+### Passo 2 (revisado) — Catálogo
+
+Reexecute a célula do catálogo com os ajustes A4–A6:
+
+```python
+# Célula 1 (revisada) — Catálogo Iceberg (SQLite local + MinIO)
+import io, os, time
+from datetime import datetime, timezone
+
+import boto3
+import pandas as pd
+import pyarrow as pa
+from pyiceberg.catalog.sql import SqlCatalog
+
+os.makedirs("../data/iceberg_catalog", exist_ok=True)
+
+MINIO = {
+    "s3.endpoint": "http://localhost:9000",
+    "s3.access-key-id": "minioadmin",
+    "s3.secret-access-key": "minioadmin123",
+    "s3.region": "us-east-1",            # evita a tentativa de descobrir a região do bucket
+}
+
+catalog = SqlCatalog(
+    "curso_lakehouse",
+    **{"uri": "sqlite:///../data/iceberg_catalog/catalog.db", "warehouse": "s3://silver", **MINIO},
+)
+catalog.create_namespace_if_not_exists("bronze_processado")
+print("Namespaces:", catalog.list_namespaces())
+```
+
+### Passo 3 — Criação da tabela Iceberg
+
+```python
+# Célula 2 — Schema fortemente tipado + particionamento oculto (hidden partitioning)
+from pyiceberg.schema import Schema
+from pyiceberg.types import (NestedField, LongType, IntegerType, StringType,
+                             DoubleType, TimestampType, BooleanType)
+from pyiceberg.partitioning import PartitionSpec, PartitionField
+from pyiceberg.transforms import MonthTransform
+
+schema_pedidos = Schema(
+    NestedField(1,  "id_pedido",         LongType(),      required=True),
+    NestedField(2,  "id_cliente",        LongType(),      required=True),
+    NestedField(3,  "id_produto",        LongType(),      required=True),
+    NestedField(4,  "categoria",         StringType()),
+    NestedField(5,  "valor_unitario",    DoubleType()),
+    NestedField(6,  "quantidade",        IntegerType()),
+    NestedField(7,  "valor_total",       DoubleType()),
+    NestedField(8,  "status_pedido",     StringType()),
+    NestedField(9,  "regiao",            StringType()),
+    NestedField(10, "data_pedido",       TimestampType()),
+    NestedField(11, "avaliacao_cliente", IntegerType()),
+    NestedField(12, "_fonte",            StringType()),
+    NestedField(13, "_ingerido_em",      StringType()),
+    identifier_field_ids=[1],            # chave lógica: usada pelo upsert
+)
+
+# O particionamento é declarado sobre uma TRANSFORMAÇÃO da coluna (mês de data_pedido).
+# Quem consulta filtra por data_pedido e não precisa conhecer a estrutura de pastas.
+spec_particao = PartitionSpec(
+    PartitionField(source_id=10, field_id=1000, transform=MonthTransform(), name="data_pedido_mes")
+)
+
+NOME_TABELA = "bronze_processado.pedidos_ecommerce"
+tabela = catalog.create_table_if_not_exists(
+    identifier=NOME_TABELA,
+    schema=schema_pedidos,
+    partition_spec=spec_particao,
+    properties={
+        "write.parquet.compression-codec": "zstd",
+        "write.metadata.compression-codec": "gzip",
+    },
+)
+print(tabela.schema())
+print(tabela.spec())
+print("Localização:", tabela.location())
+```
+
+### Passo 4 — Primeira carga (Snapshot 1)
+
+```python
+# Célula 3 — Leitura da Bronze e primeira carga
+s3 = boto3.client(
+    "s3",
+    endpoint_url="http://localhost:9000",   # dentro de contêiner: http://host.docker.internal:9000
+    aws_access_key_id="minioadmin",
+    aws_secret_access_key="minioadmin123",
+    region_name="us-east-1",
+)
+
+arquivos = [
+    o["Key"] for o in s3.list_objects_v2(Bucket="bronze", Prefix="ecommerce_sintetico/").get("Contents", [])
+    if o["Key"].endswith(".parquet")
+]
+df_bronze = pd.read_parquet(io.BytesIO(s3.get_object(Bucket="bronze", Key=arquivos[0])["Body"].read()))
+print(f"Bronze: {len(df_bronze):,} linhas em {arquivos[0]}")
+
+COLUNAS = [campo.name for campo in tabela.schema().fields]
+
+def preparar_lote(df: pd.DataFrame) -> pa.Table:
+    """Converte um DataFrame da Bronze para o schema Arrow da tabela Iceberg."""
+    df = df.copy()
+    df["avaliacao_cliente"] = pd.to_numeric(df["avaliacao_cliente"], errors="coerce").astype("Int32")
+    df["quantidade"] = df["quantidade"].astype("int32")
+    return pa.Table.from_pandas(df[COLUNAS], schema=tabela.schema().as_arrow(), preserve_index=False)
+
+inicio = time.time()
+tabela.append(preparar_lote(df_bronze.iloc[:50_000]))
+print(f"✅ Snapshot 1: 50.000 registros em {time.time() - inicio:.2f}s")
+```
+
+### Passo 5 — Segunda carga e *time travel*
+
+```python
+# Célula 4 — Segunda carga (Snapshot 2)
+tabela.append(preparar_lote(df_bronze.iloc[50_000:100_000]))
+tabela = catalog.load_table(NOME_TABELA)
+
+def listar_snapshots(t):
+    for s in sorted(t.snapshots(), key=lambda s: s.timestamp_ms):
+        ts = datetime.fromtimestamp(s.timestamp_ms / 1000, tz=timezone.utc)
+        print(f"{s.snapshot_id}  {ts:%H:%M:%S}  {s.summary.operation.value:<9}"
+              f" +{s.summary.get('added-records', '0'):>6}  total={s.summary.get('total-records')}")
+
+listar_snapshots(tabela)
+
+# Alternativa tabular (metadados como tabela Arrow)
+tabela.inspect.snapshots().to_pandas()[["committed_at", "snapshot_id", "operation"]]
+```
+
+```python
+# Célula 5 — Time travel por ID e por instante
+snapshots = sorted(tabela.snapshots(), key=lambda s: s.timestamp_ms)
+v1 = snapshots[0]                                     # o mais antigo é o PRIMEIRO em ordem cronológica
+
+n_v1    = tabela.scan(snapshot_id=v1.snapshot_id).to_arrow().num_rows
+n_atual = tabela.scan().to_arrow().num_rows
+print(f"Snapshot inicial: {n_v1:,} | Atual: {n_atual:,}")
+
+# "Como estava a tabela neste instante?"
+s = tabela.snapshot_as_of_timestamp(v1.timestamp_ms)
+print("Snapshot vigente naquele instante:", s.snapshot_id)
+
+# Leitura com filtro e projeção: o Iceberg poda partições e arquivos pelas estatísticas dos manifests
+df = tabela.scan(
+    row_filter="status_pedido == 'cancelado' and data_pedido >= '2022-01-15T00:00:00'",
+    selected_fields=("id_pedido", "valor_total", "data_pedido"),
+).to_pandas()
+print(f"Cancelados após 15/01: {len(df):,}")
+```
+
+### Passo 6 — DELETE e UPSERT transacionais (caso LGPD)
+
+```python
+# Célula 6 — Direito de eliminação (LGPD art. 18): apagar todos os pedidos de um cliente
+cliente = int(tabela.scan(selected_fields=("id_cliente",), limit=1).to_pandas().iloc[0, 0])
+print("Antes :", tabela.scan(row_filter=f"id_cliente == {cliente}").to_arrow().num_rows)
+
+tabela.delete(delete_filter=f"id_cliente == {cliente}")
+tabela = catalog.load_table(NOME_TABELA)
+
+print("Depois:", tabela.scan(row_filter=f"id_cliente == {cliente}").to_arrow().num_rows)
+print("Operação:", tabela.current_snapshot().summary.operation)
+```
+
+> **Discussão:** o registro sumiu da versão atual, mas **continua acessível por *time travel*** nos snapshots anteriores. Para cumprir a eliminação de fato, é preciso **expirar os snapshots** que ainda o contêm (rotina de manutenção da Aula 8). LGPD em Lakehouse = `DELETE` + política de retenção de snapshots.
+
+```python
+# Célula 7 — UPSERT (MERGE) pela chave id_pedido
+lote = tabela.scan(row_filter="id_pedido <= 3").to_pandas()
+lote["status_pedido"] = "reembolsado"                 # 3 pedidos alterados
+
+novo = lote.iloc[[0]].copy()
+novo["id_pedido"], novo["status_pedido"] = 2_000_001, "pendente"   # 1 pedido novo
+
+resultado = tabela.upsert(
+    pa.Table.from_pandas(pd.concat([lote, novo]), schema=tabela.schema().as_arrow(), preserve_index=False),
+    join_cols=["id_pedido"],
+)
+print(f"Atualizados: {resultado.rows_updated} | Inseridos: {resultado.rows_inserted}")
+tabela = catalog.load_table(NOME_TABELA)
+listar_snapshots(tabela)
+```
+
+### Passo 7 — Evolução de schema
+
+```python
+# Célula 8 — Adicionar e renomear colunas: operações apenas de METADADOS
+with tabela.update_schema() as atualizacao:
+    atualizacao.add_column("pedido_internacional", BooleanType(),
+                           doc="Indica se o pedido foi feito por cliente de outro país")
+    atualizacao.rename_column("avaliacao_cliente", "nota_cliente")
+
+tabela = catalog.load_table(NOME_TABELA)
+print(tabela.schema())
+
+amostra = tabela.scan(selected_fields=("id_pedido", "nota_cliente", "pedido_internacional"), limit=3)
+print(amostra.to_pandas())
+```
+
+> **Por que o *rename* não quebra nada?** O Iceberg identifica colunas por **ID** (`field_id`), não por nome. Os arquivos Parquet antigos continuam com o nome `avaliacao_cliente`, mas o campo 11 é lido como `nota_cliente`. Colunas novas retornam `NULL` nos arquivos antigos.
+
+### Passo 8 — Leitura pelo DuckDB (interoperabilidade)
+
+```python
+# Célula 9 — Outro motor lendo a mesma tabela
+import duckdb
+
+con_duck = duckdb.connect()
+con_duck.execute("INSTALL httpfs; LOAD httpfs; INSTALL iceberg; LOAD iceberg;")
+con_duck.execute("""
+    CREATE SECRET minio (TYPE s3, KEY_ID 'minioadmin', SECRET 'minioadmin123',
+                         ENDPOINT 'localhost:9000', URL_STYLE 'path', USE_SSL false, REGION 'us-east-1');
+""")
+
+print("metadata.json atual:", tabela.metadata_location)
+print(con_duck.sql(f"""
+    SELECT categoria, regiao, COUNT(*) AS pedidos,
+           ROUND(SUM(valor_total), 2) AS receita, ROUND(AVG(nota_cliente), 2) AS nota_media
+    FROM iceberg_scan('{tabela.metadata_location}')
+    WHERE status_pedido = 'concluido'
+    GROUP BY ALL ORDER BY receita DESC LIMIT 10
+""").df())
+```
+
+> O catálogo SQLite não é compartilhável entre motores; por isso apontamos o DuckDB diretamente para o `metadata.json`. Em produção, usa-se um **catálogo REST** (Apache Polaris, Lakekeeper, Nessie, AWS Glue, Unity Catalog), e qualquer motor faz `ATTACH` no catálogo.
+
+### Passo 9 — Anatomia da tabela no MinIO (correção B7)
+
+```python
+# Célula 10 — Estrutura física: metadata.json → manifest list → manifests → dados
+objetos = s3.list_objects_v2(Bucket="silver", Prefix="bronze_processado/pedidos_ecommerce/")["Contents"]
+
+def classificar(chave: str) -> str:
+    nome = chave.rsplit("/", 1)[-1]
+    if nome.endswith(".metadata.json"): return "metadata.json"
+    if nome.startswith("snap-"):        return "manifest list"
+    if nome.endswith(".avro"):          return "manifest"
+    return "dados (parquet)"
+
+resumo = pd.DataFrame([{"tipo": classificar(o["Key"]), "kb": o["Size"] / 1024} for o in objetos])
+print(resumo.groupby("tipo").agg(arquivos=("kb", "size"), total_kb=("kb", "sum")).round(1))
+
+# Visões de metadados prontas
+print(tabela.inspect.partitions().to_pandas()[["partition", "record_count", "file_count"]])
+print(tabela.inspect.files().to_pandas()[["file_path", "record_count"]].head())
+```
+
+### Verificação Final da Atividade 1
+
+1. Explicar por que cada `append`, `delete` e `upsert` gera um **novo snapshot** e nunca altera arquivos existentes.
+2. Consultar a tabela em um snapshot anterior (por ID e por instante).
+3. Executar exclusão por predicado e explicar por que a LGPD exige também **expirar snapshots**.
+4. Adicionar e renomear colunas sem reescrever dados, explicando o papel dos *field IDs*.
+5. Ler a mesma tabela pelo DuckDB e identificar os quatro níveis de arquivos no MinIO.
 
