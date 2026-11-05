@@ -3046,3 +3046,838 @@ Estado do ambiente ao final da aula:
 - catálogo `data/iceberg_catalog/catalog.db` com o namespace `bronze_processado`;
 - tabela `bronze_processado.pedidos_ecommerce` criada, ainda **sem dados** (nenhum snapshot), com localização `s3://silver/bronze_processado/pedidos_ecommerce`.
 
+## Ponto de partida (estado do repositório ao fim da aula de 29/10/2026)
+
+| Item | Estado |
+|---|---|
+| MinIO (`minio-datalake`) | Buckets `bronze`, `silver`, `gold`; Bronze com `ecommerce_sintetico/` (1 milhão de pedidos), `restcountries_api/countries/` e `pokeapi/pokemon/` (BronzeWriter, particionados por `ano=/mes=/dia=`), além das saídas do dlt (`rest_countries/`, `pokeapi/pokemon/*.parquet` sem partição) e do Spark (`ecommerce_processado/`) |
+| Jupyter (`spark-jupyter`) | Imagem customizada `curso/spark-jupyter:3.5.0-duckdb` (DuckDB, PyIceberg, `pyarrow==17.0.0`, `numpy==1.24.4`, extensões `httpfs` e `iceberg` pré-instaladas) |
+| `notebooks/1_notebook_spark.ipynb` | Concluído (Tema 2, Atividade 1) |
+| `notebooks/2_duckdb.ipynb` | Células 1 a 3: secret do DuckDB, catálogo Iceberg e criação da tabela `bronze_processado.pedidos_ecommerce` (**ainda sem dados**) |
+| `data/iceberg_catalog/catalog.db` | Catálogo SQL do Iceberg com o namespace `bronze_processado` |
+| `dbt_project/` | Só o `README.md`: o projeto dbt começa na próxima aula |
+
+## Dois ambientes de execução
+
+Desde a customização do Jupyter, o curso usa **dois ambientes**. Cada passo deste roteiro indica onde deve ser executado.
+
+| | 🐳 Contêiner `spark-jupyter` | 💻 Host Windows (`.venv`, PowerShell) |
+|---|---|---|
+| Usado para | Notebooks (`2_duckdb`, `3_gold`, …) | Scripts de `scripts/`, **dbt**, Airflow (via Docker) |
+| Python | 3.11 (imagem), NumPy 1.24 / PyArrow 17 | 3.14, NumPy 2 / PyArrow 25 |
+| Endereço do MinIO | `host.docker.internal:9000` | `localhost:9000` |
+| Pasta de dados | `../data` (= `/home/jovyan/data`) | `data/` (ou `../data` a partir de `dbt_project/`) |
+| Pasta `dbt_project/` | **não** montada | Sim |
+
+> **Regras de convivência**
+> 1. **Mesmo DuckDB nos dois lados.** O arquivo `data/lakehouse.duckdb`, criado pelo dbt no host, pode ser lido pelos notebooks. Confira se as versões coincidem (Atividade 0 da Aula 6).
+> 2. **Um escritor por vez.** Nunca deixe um notebook conectado a `data/lakehouse.duckdb` enquanto o dbt roda no host: o arquivo fica em uma pasta compartilhada entre Windows e Linux, onde o bloqueio de arquivos não é confiável. No notebook, prefira ler a Gold pelos Parquets em `s3://gold`; se abrir o `.duckdb`, use `read_only=True` e `con.close()` ao terminar.
+> 3. **Catálogo Iceberg compartilhado.** O `catalog.db` pode ser usado pelos dois lados; muda apenas o endereço do MinIO informado por quem acessa.
+
+## Cronograma das aulas restantes
+
+O meu planejamento original previa a Camada Silver na própria Aula 5. Como a aula de 29/10 foi dedicada ao ajuste da imagem do Jupyter e ao início do Iceberg, o conteúdo restante foi redistribuído nas **três aulas finais**, preservando todos os tópicos da ementa.
+
+| Aula | Tema da ementa | Prática (este roteiro) | Teoria (decks) |
+|---|---|---|---|
+| **6** | Formatos de Tabela (Lakehouse), conclusão · **Transformação e Camada Silver** | Iceberg (Células 4–11) · DuckDB analítico (Células 12–15) · dbt *staging* e *intermediate* | Aula 5 (Lakehouse, ELT/dbt, Silver) |
+| **7** | **Modelagem para Analytics, IA e Camada Gold** · **Qualidade e Testes** | Esquema estrela, fato incremental, SCD2, marts em `s3://gold`, *features* e churn · testes dbt, unitários e contratos | Aula 6 + blocos 1–2 da Aula 7 |
+| **8** | **Governança** · **Orquestração e Deploy em Produção** | Pandera na ingestão, documentação/linhagem/PII · Airflow + Cosmos, *Assets*, manutenção Iceberg e CI | Bloco 3 da Aula 7 + Aula 8 |
+
+## Convenções de nomes (continuação do repositório)
+
+| Tipo | Já existentes | Novos neste roteiro |
+|---|---|---|
+| Notebooks | `1_notebook_spark`, `2_duckdb` | `2_duckdb` (continuação), `3_gold.ipynb` |
+| Scripts | `1_…` a `11_demonstrar_partition_prunning.py`, `bronze_writer.py` | `12_carga_incremental_demo.py`, `13_treinar_churn.py`, `14_carga_invalida_demo.py`, `15_validar_bronze.py`, `16_manutencao_iceberg.py`, `17_gerar_amostra_ci.py` |
+
+> **Versões de referência (nov/2026):** DuckDB 1.5 (manter `<2.0` por compatibilidade com o PyIceberg) · PyIceberg 0.11–0.12 · dbt-core 1.12 · dbt-duckdb 1.11 · Apache Airflow 3.3 · astronomer-cosmos 1.15 · Pandera 0.35. Os blocos de código foram executados em ambiente de teste com essas versões (S3 simulado no lugar do MinIO).
+
+---
+
+# AULA 6 — Lakehouse (conclusão) e Camada Silver com dbt
+
+**Pré-requisitos:** estado descrito em "Ponto de partida"; MinIO e `spark-jupyter` em execução.
+
+| Atividade | Tema | Onde | Ferramentas |
+|---|---|---|---|
+| 0 | Retomada do ambiente e alinhamento de versões | 🐳 + 💻 | Docker, PowerShell |
+| 1 | Apache Iceberg (continuação): cargas, *time travel*, DELETE/UPSERT, evolução de schema | 🐳 `2_duckdb.ipynb` | PyIceberg, DuckDB |
+| 2 | DuckDB como motor analítico sobre a Bronze | 🐳 `2_duckdb.ipynb` | DuckDB SQL |
+| 3 | Projeto dbt e modelos *staging* | 💻 PowerShell | dbt-core, dbt-duckdb |
+| 4 | Modelos *intermediate*: deduplicação, enriquecimento e segmentação | 💻 PowerShell | dbt, macros Jinja |
+
+---
+
+## Atividade 0 — Retomada do Ambiente
+
+### Passo 1 — Subir os serviços
+
+```powershell
+cd ~/engenharia-dados-2026-2/docker
+docker compose up -d minio spark-jupyter
+docker compose ps
+docker logs spark-jupyter 2>&1 | Select-String "token=" | Select-Object -Last 1
+```
+
+### Passo 2 — Reexecutar as Células 1 a 3 do `2_duckdb.ipynb`
+
+Abra `notebooks/2_duckdb.ipynb` no Jupyter Lab (`http://localhost:8888`) e execute as três primeiras células. O secret do DuckDB não é persistente, e o objeto `tabela` precisa ser carregado de novo. O `create_table_if_not_exists` apenas **carrega** a tabela criada na aula anterior.
+
+### Passo 3 — Alinhar a versão do DuckDB entre host e contêiner
+
+A partir da Atividade 3, o dbt (no host) grava `data/lakehouse.duckdb`, e os notebooks (no contêiner) poderão lê-lo. As duas versões do DuckDB precisam ser iguais:
+
+```powershell
+# no host
+.\.venv\Scripts\python -c "import duckdb; print(duckdb.__version__)"
+# no contêiner
+docker exec spark-jupyter python -c "import duckdb; print(duckdb.__version__)"
+```
+
+Se forem diferentes, fixe no `docker/spark-jupyter/Dockerfile` a mesma versão do host (por exemplo `"duckdb==1.5.6"` no lugar de `"duckdb>=1.4,<2"`) e reconstrua a imagem com `docker compose up -d --build spark-jupyter`. **Não** use `docker compose down -v`: a opção `-v` apaga o volume do MinIO.
+
+---
+
+## Atividade 1 — Apache Iceberg (continuação) 🐳
+
+### Objetivo
+
+Carregar dados na tabela criada na aula anterior e demonstrar, com operações reais, as garantias do Lakehouse: snapshots imutáveis, *time travel*, exclusão e *upsert* transacionais (caso LGPD), evolução de schema sem reescrita e leitura por outro motor.
+
+> Todas as células desta atividade continuam o `notebooks/2_duckdb.ipynb`, depois da Célula 3. Elas usam os objetos `con`, `MINIO`, `catalog`, `tabela` e `NOME_TABELA` das células anteriores.
+
+### Passo 4 — Primeira carga (Snapshot 1)
+
+```python
+# Célula 4 — Leitura da Bronze e primeira carga
+s3 = boto3.client(
+    "s3",
+    endpoint_url=MINIO["s3.endpoint"],          # http://host.docker.internal:9000 (definido na Célula 2)
+    aws_access_key_id=MINIO["s3.access-key-id"],
+    aws_secret_access_key=MINIO["s3.secret-access-key"],
+    region_name="us-east-1",
+)
+
+arquivos = [
+    o["Key"] for o in s3.list_objects_v2(Bucket="bronze", Prefix="ecommerce_sintetico/").get("Contents", [])
+    if o["Key"].endswith(".parquet")
+]
+df_bronze = pd.read_parquet(io.BytesIO(s3.get_object(Bucket="bronze", Key=arquivos[0])["Body"].read()))
+print(f"Bronze: {len(df_bronze):,} linhas em {arquivos[0]}")
+
+COLUNAS = [campo.name for campo in tabela.schema().fields]
+
+def preparar_lote(df: pd.DataFrame) -> pa.Table:
+    """Converte um DataFrame da Bronze para o schema Arrow da tabela Iceberg."""
+    df = df.copy()
+    df["avaliacao_cliente"] = pd.to_numeric(df["avaliacao_cliente"], errors="coerce").astype("Int32")
+    df["quantidade"] = df["quantidade"].astype("int32")
+    return pa.Table.from_pandas(df[COLUNAS], schema=tabela.schema().as_arrow(), preserve_index=False)
+
+inicio = time.time()
+tabela.append(preparar_lote(df_bronze.iloc[:50_000]))
+print(f"✅ Snapshot 1: 50.000 registros em {time.time() - inicio:.2f}s")
+```
+
+### Passo 5 — Segunda carga e *time travel*
+
+```python
+# Célula 5 — Segunda carga (Snapshot 2) e histórico de snapshots
+tabela.append(preparar_lote(df_bronze.iloc[50_000:100_000]))
+tabela = catalog.load_table(NOME_TABELA)
+
+def listar_snapshots(t):
+    for s in sorted(t.snapshots(), key=lambda s: s.timestamp_ms):
+        ts = datetime.fromtimestamp(s.timestamp_ms / 1000, tz=timezone.utc)
+        print(f"{s.snapshot_id}  {ts:%H:%M:%S}  {s.summary.operation.value:<9}"
+              f" +{s.summary.get('added-records', '0'):>6}  total={s.summary.get('total-records')}")
+
+listar_snapshots(tabela)
+
+# Alternativa tabular (metadados como tabela Arrow)
+tabela.inspect.snapshots().to_pandas()[["committed_at", "snapshot_id", "operation"]]
+```
+
+```python
+# Célula 6 — Time travel por ID e por instante
+snapshots = sorted(tabela.snapshots(), key=lambda s: s.timestamp_ms)
+v1 = snapshots[0]                                     # o mais antigo é o PRIMEIRO em ordem cronológica
+
+n_v1    = tabela.scan(snapshot_id=v1.snapshot_id).to_arrow().num_rows
+n_atual = tabela.scan().to_arrow().num_rows
+print(f"Snapshot inicial: {n_v1:,} | Atual: {n_atual:,}")
+
+# "Como estava a tabela neste instante?"
+s = tabela.snapshot_as_of_timestamp(v1.timestamp_ms)
+print("Snapshot vigente naquele instante:", s.snapshot_id)
+
+# Leitura com filtro e projeção: o Iceberg poda partições e arquivos pelas estatísticas dos manifests
+df = tabela.scan(
+    row_filter="status_pedido == 'cancelado' and data_pedido >= '2022-01-15T00:00:00'",
+    selected_fields=("id_pedido", "valor_total", "data_pedido"),
+).to_pandas()
+print(f"Cancelados após 15/01: {len(df):,}")
+```
+
+### Passo 6 — DELETE e UPSERT transacionais (caso LGPD)
+
+```python
+# Célula 7 — Direito de eliminação (LGPD art. 18): apagar todos os pedidos de um cliente
+cliente = int(tabela.scan(selected_fields=("id_cliente",), limit=1).to_pandas().iloc[0, 0])
+print("Antes :", tabela.scan(row_filter=f"id_cliente == {cliente}").to_arrow().num_rows)
+
+tabela.delete(delete_filter=f"id_cliente == {cliente}")
+tabela = catalog.load_table(NOME_TABELA)
+
+print("Depois:", tabela.scan(row_filter=f"id_cliente == {cliente}").to_arrow().num_rows)
+print("Operação:", tabela.current_snapshot().summary.operation)
+```
+
+> **Discussão:** o registro sumiu da versão atual, mas **continua acessível por *time travel*** nos snapshots anteriores. Para cumprir a eliminação de fato, é preciso **expirar os snapshots** que ainda o contêm (rotina de manutenção da Aula 8). LGPD em Lakehouse = `DELETE` + política de retenção de snapshots. Observe também o volume reescrito no resumo do snapshot (`added-records`): com *copy-on-write*, o Iceberg regrava os arquivos que continham o cliente.
+
+```python
+# Célula 8 — UPSERT (MERGE) pela chave id_pedido
+lote = tabela.scan(row_filter="id_pedido <= 3").to_pandas()
+lote["status_pedido"] = "reembolsado"                 # 3 pedidos alterados
+
+novo = lote.iloc[[0]].copy()
+novo["id_pedido"], novo["status_pedido"] = 2_000_001, "pendente"   # 1 pedido novo
+
+resultado = tabela.upsert(
+    pa.Table.from_pandas(pd.concat([lote, novo]), schema=tabela.schema().as_arrow(), preserve_index=False),
+    join_cols=["id_pedido"],
+)
+print(f"Atualizados: {resultado.rows_updated} | Inseridos: {resultado.rows_inserted}")
+tabela = catalog.load_table(NOME_TABELA)
+listar_snapshots(tabela)
+```
+
+### Passo 7 — Evolução de schema
+
+```python
+# Célula 9 — Adicionar e renomear colunas: operações apenas de METADADOS
+with tabela.update_schema() as atualizacao:
+    atualizacao.add_column("pedido_internacional", BooleanType(),
+                           doc="Indica se o pedido foi feito por cliente de outro país")
+    atualizacao.rename_column("avaliacao_cliente", "nota_cliente")
+
+tabela = catalog.load_table(NOME_TABELA)
+print(tabela.schema())
+
+amostra = tabela.scan(selected_fields=("id_pedido", "nota_cliente", "pedido_internacional"), limit=3)
+print(amostra.to_pandas())
+```
+
+> **Por que o *rename* não quebra nada?** O Iceberg identifica colunas por **ID** (`field_id`), não por nome. Os arquivos Parquet antigos continuam com o nome `avaliacao_cliente`, mas o campo 11 é lido como `nota_cliente`. Colunas novas retornam `NULL` nos arquivos antigos.
+>
+> **Atenção:** depois desta célula, a coluna passa a se chamar `nota_cliente`. Se precisar reexecutar as Células 4 a 8, que usam `avaliacao_cliente`, recrie a tabela: `catalog.drop_table(NOME_TABELA)` e depois Célula 3.
+
+### Passo 8 — Leitura pelo DuckDB (interoperabilidade)
+
+```python
+# Célula 10 — Outro motor lendo a mesma tabela (reaproveita a conexão `con` da Célula 1)
+con.execute("LOAD iceberg;")             # extensão já instalada na imagem
+
+print("metadata.json atual:", tabela.metadata_location)
+con.sql(f"""
+    SELECT categoria, regiao, COUNT(*) AS pedidos,
+           ROUND(SUM(valor_total), 2) AS receita, ROUND(AVG(nota_cliente), 2) AS nota_media
+    FROM iceberg_scan('{tabela.metadata_location}')
+    WHERE status_pedido = 'concluido'
+    GROUP BY ALL ORDER BY receita DESC LIMIT 10
+""").df()
+```
+
+> O catálogo SQLite não é compartilhável entre motores; por isso apontamos o DuckDB diretamente para o `metadata.json`. Em produção, usa-se um **catálogo REST** (Apache Polaris, Lakekeeper, Nessie, AWS Glue, Unity Catalog), e qualquer motor faz `ATTACH` no catálogo.
+
+### Passo 9 — Anatomia da tabela no MinIO
+
+```python
+# Célula 11 — Estrutura física: metadata.json → manifest list → manifests → dados
+objetos = s3.list_objects_v2(Bucket="silver", Prefix="bronze_processado/pedidos_ecommerce/")["Contents"]
+
+def classificar(chave: str) -> str:
+    nome = chave.rsplit("/", 1)[-1]
+    if nome.endswith(".metadata.json"): return "metadata.json"
+    if nome.startswith("snap-"):        return "manifest list"
+    if nome.endswith(".avro"):          return "manifest"
+    return "dados (parquet)"
+
+resumo = pd.DataFrame([{"tipo": classificar(o["Key"]), "kb": o["Size"] / 1024} for o in objetos])
+print(resumo.groupby("tipo").agg(arquivos=("kb", "size"), total_kb=("kb", "sum")).round(1))
+
+# Visões de metadados prontas
+print(tabela.inspect.partitions().to_pandas()[["partition", "record_count", "file_count"]])
+print(tabela.inspect.files().to_pandas()[["file_path", "record_count"]].head())
+```
+
+> Em `inspect.partitions()`, o valor `{'data_pedido_mes': 624}` é o número de meses desde jan/1970: (2022 − 1970) × 12 = 624, ou seja, jan/2022.
+
+### Verificação Final da Atividade 1
+
+1. Explicar por que cada `append`, `delete` e `upsert` gera um **novo snapshot** e nunca altera arquivos existentes.
+2. Consultar a tabela em um snapshot anterior (por ID e por instante).
+3. Executar exclusão por predicado e explicar por que a LGPD exige também **expirar snapshots**.
+4. Adicionar e renomear colunas sem reescrever dados, explicando o papel dos *field IDs*.
+5. Ler a mesma tabela pelo DuckDB e identificar os quatro níveis de arquivos no MinIO.
+
+---
+
+## Atividade 2 — DuckDB como Motor Analítico 🐳
+
+### Objetivo
+
+Usar o DuckDB para consultas SQL analíticas diretamente sobre os Parquets da Bronze, sem carregá-los em memória nem em um servidor. É o mesmo motor que o dbt usará na Atividade 3, e o mesmo SQL aparecerá nos modelos.
+
+### Passo 1 — Consulta direta sobre Parquet no MinIO
+
+```python
+# Célula 12 — Agregação direta sobre a Bronze (1 milhão de pedidos)
+inicio = time.time()
+resultado = con.sql("""
+    SELECT categoria,
+           COUNT(*)                    AS total_pedidos,
+           ROUND(SUM(valor_total), 2)  AS receita_total,
+           ROUND(AVG(valor_total), 2)  AS ticket_medio
+    FROM read_parquet('s3://bronze/ecommerce_sintetico/ano=*/**/*.parquet')
+    WHERE status_pedido = 'concluido'
+    GROUP BY categoria
+    ORDER BY receita_total DESC
+""").df()
+print(f"Tempo: {time.time() - inicio:.2f}s")
+resultado
+```
+
+> O padrão `ano=*/**/*.parquet` lê apenas os arquivos dentro da estrutura de partições da convenção da Bronze (Aula 2). Arquivos fora dela, como os gravados pelo `dlt` sem partição, ficam de fora.
+
+### Passo 2 — CTEs, agregações condicionais e funções de janela
+
+```python
+# Célula 13 — Cancelamento e satisfação por região (CTE + FILTER)
+con.sql("""
+    WITH pedidos AS (
+        SELECT regiao, status_pedido, valor_total, avaliacao_cliente
+        FROM read_parquet('s3://bronze/ecommerce_sintetico/ano=*/**/*.parquet')
+    )
+    SELECT regiao,
+           COUNT(*)                                                            AS total_pedidos,
+           ROUND(SUM(valor_total), 2)                                          AS receita_total,
+           ROUND(100.0 * COUNT(*) FILTER (WHERE status_pedido = 'cancelado') / COUNT(*), 2)
+                                                                               AS taxa_cancelamento_pct,
+           ROUND(AVG(avaliacao_cliente), 2)                                    AS nota_media
+    FROM pedidos
+    GROUP BY regiao
+    ORDER BY receita_total DESC
+""").df()
+```
+
+```python
+# Célula 14 — Crescimento mensal por categoria (window function LAG)
+con.sql("""
+    WITH vendas_mensais AS (
+        SELECT DATE_TRUNC('month', data_pedido) AS mes, categoria,
+               ROUND(SUM(valor_total), 2)       AS receita_mes
+        FROM read_parquet('s3://bronze/ecommerce_sintetico/ano=*/**/*.parquet')
+        WHERE status_pedido = 'concluido'
+        GROUP BY ALL
+    )
+    SELECT mes, categoria, receita_mes,
+           ROUND(100.0 * (receita_mes - LAG(receita_mes) OVER w)
+                 / NULLIF(LAG(receita_mes) OVER w, 0), 2) AS crescimento_pct
+    FROM vendas_mensais
+    WINDOW w AS (PARTITION BY categoria ORDER BY mes)
+    QUALIFY mes < '2022-04-01'
+    ORDER BY categoria, mes
+""").df()
+```
+
+### Passo 3 — Views persistentes e exportação exploratória
+
+```python
+# Célula 15 — Views no arquivo curso_analytics.duckdb + exportação para s3://gold/exploratorio
+con.execute("""
+    CREATE OR REPLACE VIEW vw_pedidos_bronze AS
+    SELECT * FROM read_parquet('s3://bronze/ecommerce_sintetico/ano=*/**/*.parquet')
+""")
+con.execute("""
+    CREATE OR REPLACE VIEW vw_pokemon_bronze AS
+    SELECT * FROM read_parquet('s3://bronze/pokeapi/pokemon/ano=*/**/*.parquet', union_by_name = true)
+""")
+
+# Resultados exploratórios NÃO vão para a Bronze (que guarda só dados brutos)
+con.execute("""
+    COPY (
+        SELECT categoria, regiao, DATE_TRUNC('month', data_pedido) AS mes,
+               COUNT(*) AS pedidos, ROUND(SUM(valor_total), 2) AS receita
+        FROM vw_pedidos_bronze
+        WHERE status_pedido = 'concluido'
+        GROUP BY ALL
+    ) TO 's3://gold/exploratorio/resumo_mensal.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)
+""")
+con.sql("SELECT COUNT(*) AS linhas FROM 's3://gold/exploratorio/resumo_mensal.parquet'").show()
+con.close()          # libera o arquivo .duckdb antes de seguir para o dbt
+```
+
+> **Por que a *view* persiste e a credencial não?** A *view* fica gravada no `curso_analytics.duckdb`; o secret, não. Ao reabrir o notebook, rode a Célula 1 antes de consultar as *views*.
+>
+> **Exercício (DuckDB × Spark):** rode a agregação da Célula 12 também no `1_notebook_spark.ipynb` e compare o tempo total, incluindo a criação da `SparkSession`. Quando cada motor é preferível?
+
+---
+
+## Atividade 3 — Projeto dbt e Modelos *Staging* 💻
+
+### Objetivo
+
+Criar o projeto dbt que materializa a **Camada Silver** sobre a Bronze do MinIO: fontes declaradas, modelos *staging* 1:1 com as fontes, macros reutilizáveis e testes básicos. Tudo é executado pelo DuckDB, sem servidor.
+
+### Passo 1 — Instalação (host, PowerShell com o `.venv` ativo)
+
+O dbt roda **no host**: a pasta `dbt_project/` não está montada no contêiner do Jupyter, e o dbt é uma ferramenta de linha de comando, versionada junto com o projeto.
+
+```powershell
+cd ~/engenharia-dados-2026-2
+.\.venv\Scripts\Activate.ps1
+pip install "dbt-core~=1.12.0" "dbt-duckdb~=1.11.0" "duckdb>=1.4,<2"   # mantém o DuckDB já instalado
+dbt --version
+python -c "import duckdb; print(duckdb.__version__)"                     # deve ser igual ao do contêiner
+```
+
+O `dbt-core` é o motor (compilação Jinja → SQL, grafo de dependências, testes). O `dbt-duckdb` é o **adaptador**. Em outro *warehouse*, troca-se só o adaptador e o `profiles.yml`.
+
+### Passo 2 — Estrutura do projeto
+
+A pasta `dbt_project/` já existe desde a Aula 1, e o `dbt init` recusa pastas existentes. Por isso, crie a estrutura manualmente:
+
+```powershell
+cd dbt_project
+mkdir models/staging, models/intermediate, models/marts/core, models/marts/analytics, models/marts/ml, macros, snapshots, tests, seeds
+```
+
+```text
+dbt_project/
+├── dbt_project.yml          # configuração do projeto
+├── profiles.yml             # conexão (fica no projeto; segredos vêm de variáveis de ambiente)
+├── macros/                  # funções Jinja reutilizáveis (DRY)
+├── models/
+│   ├── staging/             # SILVER — 1 modelo por fonte: renomear, tipar, padronizar
+│   ├── intermediate/        # SILVER — joins, deduplicação, regras de negócio
+│   └── marts/               # GOLD (Aula 7) — fatos, dimensões, features
+├── snapshots/               # SCD tipo 2 (Aula 7)
+└── tests/                   # testes singulares (Aula 7)
+```
+
+### Passo 3 — `dbt_project.yml`
+
+```yaml
+name: curso_ed
+version: "1.0.0"
+profile: curso_ed
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+snapshot-paths: ["snapshots"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+vars:
+  bronze_root: "s3://bronze"
+  gold_root: "s3://gold"
+  dias_churn: 60
+
+models:
+  curso_ed:
+    staging:
+      +schema: staging
+      +materialized: view
+    intermediate:
+      +schema: intermediate
+      +materialized: view
+    marts:
+      +schema: marts
+      +materialized: table
+```
+
+### Passo 4 — `profiles.yml` (conexão DuckDB + MinIO)
+
+```yaml
+curso_ed:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('DUCKDB_PATH', '../data/lakehouse.duckdb') }}"
+      threads: 4
+      extensions: [httpfs]
+      secrets:
+        - type: s3
+          key_id: "{{ env_var('MINIO_ACCESS_KEY', 'minioadmin') }}"
+          secret: "{{ env_var('MINIO_SECRET_KEY', 'minioadmin123') }}"
+          endpoint: "{{ env_var('MINIO_ENDPOINT', 'localhost:9000') }}"
+          region: us-east-1
+          url_style: path
+          use_ssl: false
+```
+
+> `env_var()` com valor padrão permite rodar localmente sem configuração e, em produção ou no contêiner, injetar credenciais por variáveis de ambiente, **sem versionar segredos**. O caminho do banco também é parametrizado, porque o Airflow (Aula 8) executa o dbt a partir de outro diretório.
+
+```powershell
+dbt debug          # deve terminar com "All checks passed!"
+```
+
+### Passo 5 — Macros (DRY)
+
+`macros/generate_schema_name.sql` faz os schemas se chamarem `staging`, `intermediate` e `marts`. Sem ela, o padrão do dbt geraria `main_staging`:
+
+```sql
+{% macro generate_schema_name(custom_schema_name, node) -%}
+    {%- if custom_schema_name is none -%}
+        {{ target.schema }}
+    {%- else -%}
+        {{ custom_schema_name | trim }}
+    {%- endif -%}
+{%- endmacro %}
+```
+
+`macros/padronizar_string.sql`:
+
+```sql
+{% macro padronizar_string(coluna) -%}
+    nullif(lower(trim({{ coluna }})), '')
+{%- endmacro %}
+```
+
+`macros/mapear_status.sql` traduz o status técnico da origem para o vocabulário de negócio:
+
+```sql
+{% macro mapear_status(coluna) -%}
+    case {{ padronizar_string(coluna) }}
+        when 'concluido'   then 'faturado'
+        when 'reembolsado' then 'estornado'
+        when 'cancelado'   then 'cancelado'
+        when 'pendente'    then 'em_aberto'
+        else 'desconhecido'
+    end
+{%- endmacro %}
+```
+
+`macros/colunas_auditoria.sql`:
+
+```sql
+{% macro colunas_auditoria() -%}
+    current_timestamp            as _dbt_processado_em,
+    '{{ invocation_id }}'        as _dbt_invocation_id,
+    '{{ this.name }}'            as _dbt_modelo
+{%- endmacro %}
+```
+
+`macros/contar_por_valor.sql` usa um laço Jinja para gerar SQL dinâmico (um *pivot*):
+
+```sql
+{% macro contar_por_valor(coluna, valores, prefixo='qtd') -%}
+    {%- for valor in valores %}
+    count(*) filter (where {{ coluna }} = '{{ valor }}') as {{ prefixo }}_{{ valor }}
+    {%- if not loop.last %},{% endif %}
+    {%- endfor %}
+{%- endmacro %}
+```
+
+### Passo 6 — Declaração das fontes (`models/staging/_sources.yml`)
+
+```yaml
+version: 2
+
+sources:
+  - name: ecommerce
+    description: "Pedidos do sistema de e-commerce (dataset sintético da Aula 1) na camada Bronze"
+    tables:
+      - name: pedidos
+        config:
+          external_location: "read_parquet('{{ var('bronze_root') }}/ecommerce_sintetico/ano=*/**/*.parquet', hive_partitioning = false, union_by_name = true, filename = true)"
+          loaded_at_field: "cast(_ingerido_em as timestamptz)"
+          freshness:
+            warn_after: {count: 7, period: day}
+            error_after: {count: 30, period: day}
+
+  - name: restcountries
+    description: "Países da REST Countries API v5 (Aula 2)"
+    tables:
+      - name: countries
+        config:
+          external_location: "read_parquet('{{ var('bronze_root') }}/restcountries_api/countries/ano=*/**/*.parquet', union_by_name = true, filename = true)"
+
+  - name: pokeapi
+    description: "Pokémons da PokeAPI (Aula 2)"
+    tables:
+      - name: pokemon
+        config:
+          external_location: "read_parquet('{{ var('bronze_root') }}/pokeapi/pokemon/ano=*/**/*.parquet', union_by_name = true, filename = true)"
+```
+
+> **Por que `ano=*/**`?** Na Bronze, `pokeapi/pokemon/` contém dois conjuntos de arquivos: os do `dlt` (Aula 2, sem partição e com outro schema, em que os *stats* ficam em tabela filha) e os do `BronzeWriter` (`ano=/mes=/dia=`, colunas `hp_base`, `ataque_base` etc.). O padrão `ano=*/**` lê somente os arquivos que seguem a convenção da Bronze.
+>
+> `filename = true` acrescenta a coluna `filename` com o arquivo de origem de cada linha, o que dá linhagem até o arquivo da Bronze. `union_by_name` tolera arquivos com colunas em ordem diferente ou colunas novas (evolução de schema na origem).
+
+### Passo 7 — Modelos *staging*
+
+`models/staging/stg_ecommerce__pedidos.sql`. A convenção `stg_<fonte>__<entidade>` vem do guia de estilo do dbt.
+
+```sql
+-- Staging: 1:1 com a fonte. Apenas renomear, tipar e padronizar.
+with fonte as (
+    select * from {{ source('ecommerce', 'pedidos') }}
+),
+
+renomeado as (
+    select
+        cast(id_pedido  as bigint)                   as pedido_id,
+        cast(id_cliente as bigint)                   as cliente_id,
+        cast(id_produto as bigint)                   as produto_id,
+        {{ padronizar_string('categoria') }}         as categoria,
+        {{ padronizar_string('regiao') }}            as regiao,
+        {{ padronizar_string('status_pedido') }}     as status_origem,
+        {{ mapear_status('status_pedido') }}         as status_pedido,
+        cast(valor_unitario as decimal(12, 2))       as valor_unitario,
+        cast(quantidade     as integer)              as quantidade,
+        cast(valor_total    as decimal(14, 2))       as valor_total,
+        cast(avaliacao_cliente as integer)           as avaliacao_cliente,
+        cast(data_pedido as timestamp)               as pedido_em,
+        cast(data_pedido as date)                    as data_pedido,
+        _fonte                                       as fonte_sistema,
+        cast(_ingerido_em as timestamptz)            as ingerido_em,
+        filename                                     as arquivo_origem
+    from fonte
+)
+
+select * from renomeado
+```
+
+`models/staging/stg_restcountries__paises.sql`:
+
+```sql
+select
+    upper(trim(cca2))                       as pais_codigo,
+    trim(nome_comum)                        as pais_nome,
+    trim(nome_oficial)                      as pais_nome_oficial,
+    {{ padronizar_string('regiao') }}       as regiao_mundial,
+    trim(capital)                           as capital,
+    cast(populacao as bigint)               as populacao,
+    cast(area_km2  as double)               as area_km2,
+    cast(_ingerido_em as timestamptz)       as ingerido_em,
+    filename                                as arquivo_origem
+from {{ source('restcountries', 'countries') }}
+```
+
+`models/staging/stg_pokeapi__pokemon.sql`:
+
+```sql
+select
+    cast(id as integer)                          as pokemon_id,
+    {{ padronizar_string('nome') }}              as pokemon_nome,
+    {{ padronizar_string('tipo_primario') }}     as tipo_primario,
+    {{ padronizar_string('tipo_secundario') }}   as tipo_secundario,
+    cast(altura_dm as integer) * 10              as altura_cm,
+    cast(peso_hg   as integer) / 10.0            as peso_kg,
+    cast(hp_base     as integer)                 as hp_base,
+    cast(ataque_base as integer)                 as ataque_base,
+    cast(defesa_base as integer)                 as defesa_base,
+    cast(_ingerido_em as timestamptz)            as ingerido_em,
+    filename                                     as arquivo_origem
+from {{ source('pokeapi', 'pokemon') }}
+```
+
+### Passo 8 — Documentação e testes da *staging* (`models/staging/_staging.yml`)
+
+```yaml
+version: 2
+
+models:
+  - name: stg_ecommerce__pedidos
+    description: "Pedidos da Bronze renomeados, tipados e padronizados (pode conter duplicatas de reingestão)."
+    columns:
+      - name: pedido_id
+        description: "Identificador do pedido no sistema de origem"
+        data_tests:
+          - not_null
+      - name: cliente_id
+        data_tests:
+          - not_null
+      - name: status_pedido
+        description: "Status harmonizado pela macro mapear_status"
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['faturado', 'cancelado', 'em_aberto', 'estornado']
+```
+
+> A partir do dbt 1.10, os parâmetros dos testes genéricos ficam sob `arguments:`. A sintaxe antiga ainda funciona, mas gera aviso de depreciação.
+
+### Passo 9 — Compilar, executar e inspecionar
+
+```powershell
+dbt compile --select stg_ecommerce__pedidos     # veja o SQL gerado em target/compiled/
+dbt build --select staging                       # cria as views e roda os testes, nesta ordem
+dbt show --select stg_ecommerce__pedidos --limit 5
+```
+
+Abra `target/compiled/curso_ed/models/staging/stg_ecommerce__pedidos.sql` e veja as macros expandidas em SQL puro: o banco nunca vê Jinja.
+
+---
+
+## Atividade 4 — Modelos *Intermediate* 💻
+
+### Objetivo
+
+Aplicar a lógica que torna a Silver confiável: **deduplicação** das cargas *append-only* da Bronze, **enriquecimento** com regras de negócio e **métricas de cliente** (segmentação RFM), respondendo à pergunta da Aula 4: *"como foi calculado o segmento VIP?"*
+
+### Passo 1 — Deduplicação (`models/intermediate/int_pedidos__deduplicados.sql`)
+
+```sql
+-- A Bronze é append-only: o mesmo pedido pode chegar em várias cargas.
+-- Mantemos apenas a versão mais recente de cada pedido_id.
+select *
+from {{ ref('stg_ecommerce__pedidos') }}
+qualify row_number() over (
+    partition by pedido_id
+    order by ingerido_em desc, arquivo_origem desc
+) = 1
+```
+
+> **Simulação:** para ver a deduplicação funcionando, faça uma segunda carga parcial do dataset sintético em outra partição de data (ex.: 1.000 pedidos com `status_pedido` alterado e novo `_ingerido_em`). O `stg_` terá 1.001.000 linhas e o `int_` continuará com 1.000.000.
+
+### Passo 2 — Enriquecimento (`models/intermediate/int_pedidos__enriquecidos.sql`)
+
+```sql
+select
+    pedido_id,
+    cliente_id,
+    produto_id,
+    categoria,
+    regiao,
+    status_pedido,
+    status_pedido = 'faturado'                          as is_faturado,
+    valor_unitario,
+    quantidade,
+    valor_total,
+    case
+        when valor_total <  100  then 'baixo'
+        when valor_total <  500  then 'medio'
+        when valor_total < 1500  then 'alto'
+        else 'premium'
+    end                                                 as faixa_valor,
+    avaliacao_cliente,
+    avaliacao_cliente >= 4                              as is_avaliacao_positiva,
+    pedido_em,
+    data_pedido,
+    date_trunc('month', data_pedido)::date              as mes_pedido,
+    row_number() over (
+        partition by cliente_id order by pedido_em
+    )                                                   as sequencia_pedido_cliente,
+    ingerido_em,
+    {{ colunas_auditoria() }}
+from {{ ref('int_pedidos__deduplicados') }}
+```
+
+### Passo 3 — Métricas e segmento de cliente (`models/intermediate/int_clientes__metricas.sql`)
+
+```sql
+-- Métricas por cliente e segmentação RFM (Recência, Frequência, Valor monetário)
+{% set status_possiveis = ['faturado', 'cancelado', 'em_aberto', 'estornado'] %}
+
+with pedidos as (
+    select * from {{ ref('int_pedidos__enriquecidos') }}
+),
+
+data_referencia as (
+    select max(data_pedido) as data_ref from pedidos
+),
+
+agregado as (
+    select
+        cliente_id,
+        min(data_pedido)                                     as primeiro_pedido_em,
+        max(data_pedido)                                     as ultimo_pedido_em,
+        count(*)                                             as total_pedidos,
+        {{ contar_por_valor('status_pedido', status_possiveis) }},
+        sum(valor_total) filter (where is_faturado)          as receita_total,
+        avg(valor_total) filter (where is_faturado)          as ticket_medio,
+        avg(avaliacao_cliente)                               as nota_media
+    from pedidos
+    group by cliente_id
+),
+
+rfm as (
+    select
+        a.*,
+        d.data_ref - a.ultimo_pedido_em                                 as dias_desde_ultimo_pedido,
+        ntile(5) over (order by d.data_ref - a.ultimo_pedido_em desc)   as score_r,
+        ntile(5) over (order by a.qtd_faturado)                         as score_f,
+        ntile(5) over (order by coalesce(a.receita_total, 0))           as score_m
+    from agregado a
+    cross join data_referencia d
+)
+
+select
+    *,
+    case
+        when score_m = 5 and score_f >= 4 and score_r >= 4 then 'vip'
+        when score_m >= 4                                  then 'alto_valor'
+        when score_r <= 2                                  then 'em_risco'
+        else 'regular'
+    end as segmento_cliente
+from rfm
+```
+
+### Passo 4 — Testes da *intermediate* (`models/intermediate/_intermediate.yml`)
+
+```yaml
+version: 2
+
+models:
+  - name: int_pedidos__deduplicados
+    description: "Última versão de cada pedido (deduplicação por pedido_id)."
+    columns:
+      - name: pedido_id
+        data_tests: [unique, not_null]
+
+  - name: int_clientes__metricas
+    description: "Uma linha por cliente com métricas RFM e segmento."
+    columns:
+      - name: cliente_id
+        data_tests: [unique, not_null]
+      - name: segmento_cliente
+        description: "vip = quintil superior em valor, com alta frequência e recência"
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['vip', 'alto_valor', 'em_risco', 'regular']
+```
+
+### Passo 5 — Execução, linhagem e documentação
+
+```powershell
+dbt build                          # staging + intermediate + testes
+dbt docs generate
+dbt docs serve --port 8081         # abra http://localhost:8081 e clique no ícone de grafo (lineage)
+```
+
+```powershell
+# Conferindo a Silver pelo próprio dbt (sem abrir o .duckdb em outro processo)
+dbt show --inline "select segmento_cliente, count(*) as clientes, round(avg(receita_total)) as receita_media from {{ ref('int_clientes__metricas') }} group by 1 order by 3 desc"
+```
+
+> Para consultar a Silver em um notebook, **feche antes** qualquer execução do dbt e abra o arquivo em modo leitura: `duckdb.connect("../data/lakehouse.duckdb", read_only=True)`. Feche a conexão (`con.close()`) antes de rodar o dbt de novo.
+
+### Verificação Final da Atividade 4 / Consolidação da Aula 6
+
+1. Explicar a diferença de responsabilidade entre `staging` e `intermediate`.
+2. Mostrar no SQL compilado como `ref()` e `source()` foram resolvidos e por que isso cria o grafo de dependências.
+3. Demonstrar que a deduplicação mantém exatamente uma linha por `pedido_id`.
+4. Explicar `dbt run` × `dbt test` × `dbt build`.
+5. Localizar no *lineage* do `dbt docs` o caminho `source → stg → int`.
+
+> **Desafio:** crie a macro `cents_to_reais(coluna)` e uma *seed* (`seeds/regioes.csv`) com a sigla e o nome completo das regiões, ligada aos pedidos em um novo modelo *intermediate*.
+
+---
