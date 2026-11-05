@@ -2415,6 +2415,8 @@ Esta aula marca a transição do paradigma de armazenamento para o de **processa
 
 > **Contexto arquitetural:** As três atividades desta aula operam sobre a camada Bronze (leitura) e produzem resultados que serão a base da camada Silver. O processamento realizado aqui é exploratório e de validação — a transformação definitiva e documentada para a camada Silver ocorrerá na Aula 4 com o dbt.
 
+> **Andamento real:** a Atividade 1 (PySpark) foi realizada no notebook `notebooks/1_notebook_spark.ipynb`. As Atividades 2 (DuckDB) e 3 (Iceberg) foram reorganizadas no **Tema 3** e no notebook `notebooks/2_duckdb.ipynb`, depois da customização da imagem do Jupyter.
+
 ---
 
 ## Atividade 1 — Introdução ao PySpark com MinIO
@@ -2433,12 +2435,9 @@ O Apache Spark é o motor de processamento distribuído mais amplamente utilizad
 
 O Spark requer a JVM (Java Virtual Machine) e configurações específicas para se conectar ao MinIO. A forma mais simples de ter um ambiente Spark funcional é utilizando a imagem oficial do Jupyter com PySpark pré-instalado:
 
-```bash
-cd ~/engenharia-dados-curso/docker
+No arquivo `docker/compose.yml`, acrescente o serviço abaixo **dentro de `services:`**, logo após o serviço `minio` e antes da seção `volumes:`:
 
-# Adicionar o serviço Spark/Jupyter ao docker-compose.yml existente
-cat >> docker-compose.yml << 'EOF'
-
+```yaml
   # Jupyter com PySpark e suporte a S3 (MinIO)
   spark-jupyter:
     image: jupyter/pyspark-notebook:spark-3.5.0
@@ -2455,19 +2454,21 @@ cat >> docker-compose.yml << 'EOF'
       - ../data:/home/jovyan/data
     networks:
       - default
-EOF
-
-# Iniciar o serviço Spark/Jupyter
-docker compose up -d spark-jupyter
-
-# Aguardar a inicialização (pode levar 1-2 minutos)
-sleep 30
-
-# Obter o token de acesso do Jupyter
-docker logs spark-jupyter 2>&1 | grep "token=" | tail -1
 ```
 
-Acesse o Jupyter Lab em `http://localhost:8888` utilizando o token exibido no terminal. Crie um novo notebook em `notebooks/` com o nome `aula3_pyspark.ipynb`.
+> No Tema 3, a linha `image:` deste serviço é substituída por uma imagem customizada (`build: ./spark-jupyter`), que acrescenta DuckDB e PyIceberg.
+
+```powershell
+cd ~/engenharia-dados-2026-2/docker
+
+# Iniciar o serviço Spark/Jupyter (pode levar 1-2 minutos na primeira vez)
+docker compose up -d spark-jupyter
+
+# Obter o token de acesso do Jupyter
+docker logs spark-jupyter 2>&1 | Select-String "token=" | Select-Object -Last 1
+```
+
+Acesse o Jupyter Lab em `http://localhost:8888` utilizando o token exibido no terminal. Crie um novo notebook em `notebooks/` com o nome `1_notebook_spark.ipynb`.
 
 ---
 
@@ -2755,36 +2756,119 @@ df_verificacao.select("ano_pedido", "mes_pedido").distinct().orderBy("ano_pedido
 ---
 # Tema 3 — Lakehouse na prática e Camada Silver com dbt
 
-## Atividade 0 - aula de 29/10/2026
+## Aula de 29/10/2026 — o que foi realizado
 
-| Atividade | Tema | Duração | Ferramentas |
+| Atividade | Tema | Situação | Onde está |
 |---|---|---|---|
-| 0 | Ajuste do ambiente e correção da conexão DuckDB↔MinIO | 10 min | DuckDB, PowerShell |
-| 1 | Apache Iceberg: snapshots, *time travel*, DELETE/UPSERT, evolução de schema | 45 min | PyIceberg, DuckDB, MinIO |
-| 2 | Projeto dbt e modelos *staging* (Camada Silver) | 40 min | dbt-core, dbt-duckdb |
-| 3 | Modelos *intermediate*: deduplicação, enriquecimento e segmentação | 25 min | dbt, macros Jinja |
+| 0 | Ajuste do ambiente: imagem `spark-jupyter` customizada com DuckDB e PyIceberg | ✅ Concluída | `docker/spark-jupyter/Dockerfile`, `docker/compose.yml` |
+| 1 | Apache Iceberg na prática | ⏸️ Passos 1 a 3 concluídos (conexão, catálogo e criação da tabela) | `notebooks/2_duckdb.ipynb` (Células 1 a 3) |
+| — | Restante da Atividade 1, consultas analíticas com DuckDB e dbt (Camada Silver) | ➡️ Próxima aula | `roteiro-para-proximas-aulas.md` |
+
+> **Onde cada coisa roda a partir de agora**
+>
+> | Ambiente | Usado para | Endereço do MinIO | Caminho dos dados |
+> |---|---|---|---|
+> | Contêiner `spark-jupyter` (Jupyter Lab em `http://localhost:8888`) | Notebooks (`1_notebook_spark`, `2_duckdb`, …) | `host.docker.internal:9000` | `../data` → `/home/jovyan/data` |
+> | Host Windows (PowerShell + `.venv`) | Scripts da pasta `scripts/` e, a partir da próxima aula, o dbt | `localhost:9000` | `data/` na raiz do projeto |
+>
+> Dentro do contêiner, `localhost` é o **próprio contêiner**, não o Windows. Por isso os notebooks usam `host.docker.internal`.
 
 ---
 
 ## Atividade 0 — Ajuste do Ambiente
 
-### Passo 1 — Ativar o ambiente e alinhar versões
+### Passo 1 — Ambiente virtual do host
+
+O `.venv` do host (Python 3.14) continua sendo usado para os scripts e, a partir da próxima aula, para o dbt. Nele **não** fixamos versões antigas de `numpy`/`pyarrow`: essas versões não existem para Python 3.14 e não são necessárias fora do contêiner.
 
 ```powershell
 cd ~/engenharia-dados-2026-2
 .\.venv\Scripts\Activate.ps1          # Linux/macOS: source .venv/bin/activate
 
-# Mantém DuckDB < 2.0 (exigência do pyiceberg[duckdb]) e instala o catálogo SQL
+# DuckDB < 2.0 (exigência do pyiceberg[duckdb]) e driver SQLite do catálogo Iceberg
 pip install "duckdb>=1.4,<2" "pyiceberg[sql-sqlite,pyarrow,pandas,duckdb]>=0.10" boto3
 
 python -c "import duckdb, pyiceberg; print(duckdb.__version__, pyiceberg.__version__)"
 ```
 
-### Passo 2 — Conexão DuckDB↔MinIO com `CREATE SECRET`
+### Passo 2 — Por que customizar a imagem do Jupyter
 
-Crie um novo notebook `notebooks/2_iceberg.ipynb`.
+O notebook do Iceberg roda no contêiner `spark-jupyter`, cuja imagem (`jupyter/pyspark-notebook:spark-3.5.0`) não traz DuckDB nem PyIceberg. A primeira tentativa foi instalá-los com `docker exec ... pip install`, e isso quebrou o ambiente:
 
-A forma recomendada no DuckDB atual é o **gerenciador de segredos**.
+- o `pyiceberg[...]` exige `pyarrow >= 17`, e o pip instalou a versão mais recente (26);
+- o `pyarrow` 26 exige **NumPy 2**, mas a imagem traz NumPy **1.24.4**, compilado junto com pandas e PySpark;
+- resultado: `ImportError: pyarrow requires NumPy 2.0 or newer, found 1.24.4`.
+
+O problema ilustra uma situação comum com imagens prontas: imagens antigas têm componentes com versões mais novas disponíveis, e atualizar sem fixar versões gera conflitos de dependência. A forma correta é criar uma **imagem customizada** com as versões declaradas, seja no `Dockerfile`, seja em um `requirements.txt` ou no arquivo de versões do gerenciador de pacotes.
+
+### Passo 3 — Dockerfile da imagem customizada
+
+Crie a pasta `docker/spark-jupyter/` e, dentro dela, o arquivo `Dockerfile`:
+
+```dockerfile
+FROM jupyter/pyspark-notebook:spark-3.5.0
+
+# Mesmas versões usadas no venv do host (evita incompatibilidade do arquivo .duckdb)
+RUN pip install --no-cache-dir \
+      "duckdb>=1.4,<2" \
+      "pyiceberg[sql-sqlite,pyarrow,pandas,duckdb]>=0.10" \
+      "pyarrow==17.0.0" "numpy==1.24.4" \
+      boto3
+
+# Pré-instala as extensões do DuckDB na imagem (não depende de internet na hora da aula)
+RUN python -c "import duckdb; c = duckdb.connect(); c.execute('INSTALL httpfs'); c.execute('INSTALL iceberg')"
+```
+
+- `pyarrow==17.0.0` é a versão mínima aceita pelo PyIceberg e a última que ainda funciona com NumPy 1.x.
+- `numpy==1.24.4` mantém a versão original da imagem e impede que o pip a atualize.
+
+### Passo 4 — Usar a imagem customizada no compose
+
+No `docker/compose.yml`, o serviço `spark-jupyter` deixa de usar a imagem pronta e passa a construir a imagem local:
+
+```yaml
+  # Jupyter com PySpark e suporte a S3 (MinIO)
+  spark-jupyter:
+    # image: jupyter/pyspark-notebook:spark-3.5.0
+    build: ./spark-jupyter
+    image: curso/spark-jupyter:3.5.0-duckdb
+    container_name: spark-jupyter
+    ports:
+      - "8888:8888"   # Interface Jupyter
+      - "4040:4040"   # Spark UI (monitoramento de jobs)
+    environment:
+      JUPYTER_ENABLE_LAB: "yes"
+      SPARK_OPTS: "--driver-java-options=-Xms1g --driver-java-options=-Xmx4g"
+    volumes:
+      - ../notebooks:/home/jovyan/notebooks
+      - ../scripts:/home/jovyan/scripts
+      - ../data:/home/jovyan/data
+    networks:
+      - default
+```
+
+### Passo 5 — Reconstruir a imagem e recriar o contêiner
+
+```powershell
+cd ~/engenharia-dados-2026-2/docker
+docker compose up -d --build spark-jupyter     # constrói a imagem e recria só o contêiner do Jupyter
+docker compose ps                               # minio-datalake e spark-jupyter em execução
+docker logs spark-jupyter 2>&1 | Select-String "token=" | Select-Object -Last 1
+```
+
+> **Cuidado com `docker compose down -v`:** a opção `-v` remove os **volumes nomeados**, entre eles o `minio_data`, onde está toda a camada Bronze. Para trocar a imagem do Jupyter, basta `up -d --build spark-jupyter`. O compose percebe que a imagem mudou e recria apenas aquele contêiner.
+
+Confira as versões dentro do contêiner, em uma célula de notebook:
+
+```python
+import numpy, pyarrow, duckdb, pyiceberg
+print(numpy.__version__, pyarrow.__version__, duckdb.__version__, pyiceberg.__version__)
+# esperado: 1.24.4  17.0.0  1.x  0.1x
+```
+
+### Passo 6 — Notebook `2_duckdb.ipynb` e conexão DuckDB↔MinIO
+
+No Jupyter Lab, crie o notebook `notebooks/2_duckdb.ipynb`. Ele reaproveita a configuração de conexão do antigo `aula3_duckdb.ipynb`, agora com o **gerenciador de segredos** do DuckDB. Os comandos `SET s3_*` usados anteriormente valem apenas para a sessão.
 
 ```python
 # Célula 1 (revisada) — DuckDB + MinIO com Secrets Manager
@@ -2793,33 +2877,66 @@ import duckdb
 con = duckdb.connect("../data/curso_analytics.duckdb")
 con.execute("INSTALL httpfs; LOAD httpfs;")
 
-# Segredo TEMPORÁRIO: vale para esta conexão. Rode esta célula sempre que reabrir o notebook.
+# Segredo TEMPORÁRIO: vale para esta conexão quando feita entre containers Docker. Rode esta célula sempre que reabrir o notebook.
 con.execute("""
     CREATE OR REPLACE SECRET minio (
         TYPE s3,
         KEY_ID 'minioadmin',
         SECRET 'minioadmin123',
-        ENDPOINT 'localhost:9000',
+        ENDPOINT 'host.docker.internal:9000',
         URL_STYLE 'path',
         USE_SSL false,
         REGION 'us-east-1'
     );
 """)
+
+# Segredo Temporário usando localhost: vale para as conexões feitas pelo host. Rode esta célula apenas uma vez.
+#con.execute("""
+#    CREATE OR REPLACE SECRET minio (
+#        TYPE s3,
+#        KEY_ID 'minioadmin',
+#        SECRET 'minioadmin123',
+#        ENDPOINT 'localhost:9000',
+#        URL_STYLE 'path',
+#        USE_SSL false,
+#        REGION 'us-east-1'
+#    );
+#""")
+
 print(con.sql("SELECT name, type, persistent FROM duckdb_secrets()"))
 ```
 
-## Atividade 1 — Apache Iceberg na Prática (continuação)
+Saída esperada:
+
+```text
+┌─────────┬─────────┬────────────┐
+│  name   │  type   │ persistent │
+│ varchar │ varchar │  boolean   │
+├─────────┼─────────┼────────────┤
+│ minio   │ s3      │ false      │
+└─────────┴─────────┴────────────┘
+```
+
+> **Por que a *view* persiste e a credencial não?** Uma *view* é um objeto do catálogo e fica gravada no arquivo `.duckdb`. O segredo pertence à sessão. Existe `CREATE PERSISTENT SECRET`, que grava a credencial **em texto puro** em `~/.duckdb/stored_secrets`: aceitável em laboratório, nunca em produção.
+
+---
+
+## Atividade 1 — Apache Iceberg na Prática
 
 ### Objetivo
 
-Concluir a conversão da Bronze para uma tabela Iceberg e demonstrar, com operações reais, as garantias do Lakehouse: snapshots imutáveis, *time travel*, exclusão e *upsert* transacionais (caso LGPD), evolução de schema sem reescrita e leitura por outro motor (DuckDB).
+Converter a Bronze em uma tabela Iceberg e demonstrar, com operações reais, as garantias do Lakehouse: snapshots imutáveis, *time travel*, exclusão e *upsert* transacionais (caso LGPD), evolução de schema sem reescrita e leitura por outro motor (DuckDB).
 
-### Passo 2 (revisado) — Catálogo
+### Passo 1 — Dependências
 
-Reexecute a célula do catálogo com os ajustes A4–A6:
+O PyIceberg, com o driver SQLite do catálogo, já está instalado na imagem customizada (Atividade 0, Passo 3). Não é preciso instalar nada no notebook.
+
+### Passo 2 — Catálogo Iceberg
+
+O Iceberg precisa de um **catálogo** que guarde, para cada tabela, o ponteiro para o `metadata.json` atual. No laboratório usamos um catálogo SQL em SQLite (`data/iceberg_catalog/catalog.db`). Em produção, usa-se um catálogo REST (Apache Polaris, Lakekeeper, Nessie), AWS Glue ou Unity Catalog.
 
 ```python
-# Célula 1 (revisada) — Catálogo Iceberg (SQLite local + MinIO)
+# Célula 2 (revisada) — Catálogo Iceberg (SQLite local + MinIO)
 import io, os, time
 from datetime import datetime, timezone
 
@@ -2831,11 +2948,19 @@ from pyiceberg.catalog.sql import SqlCatalog
 os.makedirs("../data/iceberg_catalog", exist_ok=True)
 
 MINIO = {
-    "s3.endpoint": "http://localhost:9000",
+    "s3.endpoint": "http://host.docker.internal:9000",
     "s3.access-key-id": "minioadmin",
     "s3.secret-access-key": "minioadmin123",
     "s3.region": "us-east-1",            # evita a tentativa de descobrir a região do bucket
 }
+
+#MINIO = {
+#    "s3.endpoint": "http://localhost:9000",
+#    "s3.access-key-id": "minioadmin",
+#    "s3.secret-access-key": "minioadmin123",
+#    "s3.region": "us-east-1",            # evita a tentativa de descobrir a região do bucket
+#}
+
 
 catalog = SqlCatalog(
     "curso_lakehouse",
@@ -2845,10 +2970,14 @@ catalog.create_namespace_if_not_exists("bronze_processado")
 print("Namespaces:", catalog.list_namespaces())
 ```
 
+Saída esperada: `Namespaces: [('bronze_processado',)]`
+
+> O endereço do MinIO **não** fica gravado no catálogo: ele é uma configuração de quem acessa. O mesmo `catalog.db` pode ser usado pelo notebook (`host.docker.internal`) e por scripts no host (`localhost`).
+
 ### Passo 3 — Criação da tabela Iceberg
 
 ```python
-# Célula 2 — Schema fortemente tipado + particionamento oculto (hidden partitioning)
+# Célula 3 — Schema fortemente tipado + particionamento oculto (hidden partitioning)
 from pyiceberg.schema import Schema
 from pyiceberg.types import (NestedField, LongType, IntegerType, StringType,
                              DoubleType, TimestampType, BooleanType)
@@ -2893,181 +3022,27 @@ print(tabela.spec())
 print("Localização:", tabela.location())
 ```
 
-### Passo 4 — Primeira carga (Snapshot 1)
+Saída esperada:
 
-```python
-# Célula 3 — Leitura da Bronze e primeira carga
-s3 = boto3.client(
-    "s3",
-    endpoint_url="http://localhost:9000",   # dentro de contêiner: http://host.docker.internal:9000
-    aws_access_key_id="minioadmin",
-    aws_secret_access_key="minioadmin123",
-    region_name="us-east-1",
-)
-
-arquivos = [
-    o["Key"] for o in s3.list_objects_v2(Bucket="bronze", Prefix="ecommerce_sintetico/").get("Contents", [])
-    if o["Key"].endswith(".parquet")
+```text
+table {
+  1: id_pedido: required long
+  2: id_cliente: required long
+  ...
+  13: _ingerido_em: optional string
+}
+[
+  1000: data_pedido_mes: month(10)
 ]
-df_bronze = pd.read_parquet(io.BytesIO(s3.get_object(Bucket="bronze", Key=arquivos[0])["Body"].read()))
-print(f"Bronze: {len(df_bronze):,} linhas em {arquivos[0]}")
-
-COLUNAS = [campo.name for campo in tabela.schema().fields]
-
-def preparar_lote(df: pd.DataFrame) -> pa.Table:
-    """Converte um DataFrame da Bronze para o schema Arrow da tabela Iceberg."""
-    df = df.copy()
-    df["avaliacao_cliente"] = pd.to_numeric(df["avaliacao_cliente"], errors="coerce").astype("Int32")
-    df["quantidade"] = df["quantidade"].astype("int32")
-    return pa.Table.from_pandas(df[COLUNAS], schema=tabela.schema().as_arrow(), preserve_index=False)
-
-inicio = time.time()
-tabela.append(preparar_lote(df_bronze.iloc[:50_000]))
-print(f"✅ Snapshot 1: 50.000 registros em {time.time() - inicio:.2f}s")
+Localização: s3://silver/bronze_processado/pedidos_ecommerce
 ```
 
-### Passo 5 — Segunda carga e *time travel*
+### Final da aula de 29/10/2026
 
-```python
-# Célula 4 — Segunda carga (Snapshot 2)
-tabela.append(preparar_lote(df_bronze.iloc[50_000:100_000]))
-tabela = catalog.load_table(NOME_TABELA)
+Estado do ambiente ao final da aula:
 
-def listar_snapshots(t):
-    for s in sorted(t.snapshots(), key=lambda s: s.timestamp_ms):
-        ts = datetime.fromtimestamp(s.timestamp_ms / 1000, tz=timezone.utc)
-        print(f"{s.snapshot_id}  {ts:%H:%M:%S}  {s.summary.operation.value:<9}"
-              f" +{s.summary.get('added-records', '0'):>6}  total={s.summary.get('total-records')}")
-
-listar_snapshots(tabela)
-
-# Alternativa tabular (metadados como tabela Arrow)
-tabela.inspect.snapshots().to_pandas()[["committed_at", "snapshot_id", "operation"]]
-```
-
-```python
-# Célula 5 — Time travel por ID e por instante
-snapshots = sorted(tabela.snapshots(), key=lambda s: s.timestamp_ms)
-v1 = snapshots[0]                                     # o mais antigo é o PRIMEIRO em ordem cronológica
-
-n_v1    = tabela.scan(snapshot_id=v1.snapshot_id).to_arrow().num_rows
-n_atual = tabela.scan().to_arrow().num_rows
-print(f"Snapshot inicial: {n_v1:,} | Atual: {n_atual:,}")
-
-# "Como estava a tabela neste instante?"
-s = tabela.snapshot_as_of_timestamp(v1.timestamp_ms)
-print("Snapshot vigente naquele instante:", s.snapshot_id)
-
-# Leitura com filtro e projeção: o Iceberg poda partições e arquivos pelas estatísticas dos manifests
-df = tabela.scan(
-    row_filter="status_pedido == 'cancelado' and data_pedido >= '2022-01-15T00:00:00'",
-    selected_fields=("id_pedido", "valor_total", "data_pedido"),
-).to_pandas()
-print(f"Cancelados após 15/01: {len(df):,}")
-```
-
-### Passo 6 — DELETE e UPSERT transacionais (caso LGPD)
-
-```python
-# Célula 6 — Direito de eliminação (LGPD art. 18): apagar todos os pedidos de um cliente
-cliente = int(tabela.scan(selected_fields=("id_cliente",), limit=1).to_pandas().iloc[0, 0])
-print("Antes :", tabela.scan(row_filter=f"id_cliente == {cliente}").to_arrow().num_rows)
-
-tabela.delete(delete_filter=f"id_cliente == {cliente}")
-tabela = catalog.load_table(NOME_TABELA)
-
-print("Depois:", tabela.scan(row_filter=f"id_cliente == {cliente}").to_arrow().num_rows)
-print("Operação:", tabela.current_snapshot().summary.operation)
-```
-
-> **Discussão:** o registro sumiu da versão atual, mas **continua acessível por *time travel*** nos snapshots anteriores. Para cumprir a eliminação de fato, é preciso **expirar os snapshots** que ainda o contêm (rotina de manutenção da Aula 8). LGPD em Lakehouse = `DELETE` + política de retenção de snapshots.
-
-```python
-# Célula 7 — UPSERT (MERGE) pela chave id_pedido
-lote = tabela.scan(row_filter="id_pedido <= 3").to_pandas()
-lote["status_pedido"] = "reembolsado"                 # 3 pedidos alterados
-
-novo = lote.iloc[[0]].copy()
-novo["id_pedido"], novo["status_pedido"] = 2_000_001, "pendente"   # 1 pedido novo
-
-resultado = tabela.upsert(
-    pa.Table.from_pandas(pd.concat([lote, novo]), schema=tabela.schema().as_arrow(), preserve_index=False),
-    join_cols=["id_pedido"],
-)
-print(f"Atualizados: {resultado.rows_updated} | Inseridos: {resultado.rows_inserted}")
-tabela = catalog.load_table(NOME_TABELA)
-listar_snapshots(tabela)
-```
-
-### Passo 7 — Evolução de schema
-
-```python
-# Célula 8 — Adicionar e renomear colunas: operações apenas de METADADOS
-with tabela.update_schema() as atualizacao:
-    atualizacao.add_column("pedido_internacional", BooleanType(),
-                           doc="Indica se o pedido foi feito por cliente de outro país")
-    atualizacao.rename_column("avaliacao_cliente", "nota_cliente")
-
-tabela = catalog.load_table(NOME_TABELA)
-print(tabela.schema())
-
-amostra = tabela.scan(selected_fields=("id_pedido", "nota_cliente", "pedido_internacional"), limit=3)
-print(amostra.to_pandas())
-```
-
-> **Por que o *rename* não quebra nada?** O Iceberg identifica colunas por **ID** (`field_id`), não por nome. Os arquivos Parquet antigos continuam com o nome `avaliacao_cliente`, mas o campo 11 é lido como `nota_cliente`. Colunas novas retornam `NULL` nos arquivos antigos.
-
-### Passo 8 — Leitura pelo DuckDB (interoperabilidade)
-
-```python
-# Célula 9 — Outro motor lendo a mesma tabela
-import duckdb
-
-con_duck = duckdb.connect()
-con_duck.execute("INSTALL httpfs; LOAD httpfs; INSTALL iceberg; LOAD iceberg;")
-con_duck.execute("""
-    CREATE SECRET minio (TYPE s3, KEY_ID 'minioadmin', SECRET 'minioadmin123',
-                         ENDPOINT 'localhost:9000', URL_STYLE 'path', USE_SSL false, REGION 'us-east-1');
-""")
-
-print("metadata.json atual:", tabela.metadata_location)
-print(con_duck.sql(f"""
-    SELECT categoria, regiao, COUNT(*) AS pedidos,
-           ROUND(SUM(valor_total), 2) AS receita, ROUND(AVG(nota_cliente), 2) AS nota_media
-    FROM iceberg_scan('{tabela.metadata_location}')
-    WHERE status_pedido = 'concluido'
-    GROUP BY ALL ORDER BY receita DESC LIMIT 10
-""").df())
-```
-
-> O catálogo SQLite não é compartilhável entre motores; por isso apontamos o DuckDB diretamente para o `metadata.json`. Em produção, usa-se um **catálogo REST** (Apache Polaris, Lakekeeper, Nessie, AWS Glue, Unity Catalog), e qualquer motor faz `ATTACH` no catálogo.
-
-### Passo 9 — Anatomia da tabela no MinIO (correção B7)
-
-```python
-# Célula 10 — Estrutura física: metadata.json → manifest list → manifests → dados
-objetos = s3.list_objects_v2(Bucket="silver", Prefix="bronze_processado/pedidos_ecommerce/")["Contents"]
-
-def classificar(chave: str) -> str:
-    nome = chave.rsplit("/", 1)[-1]
-    if nome.endswith(".metadata.json"): return "metadata.json"
-    if nome.startswith("snap-"):        return "manifest list"
-    if nome.endswith(".avro"):          return "manifest"
-    return "dados (parquet)"
-
-resumo = pd.DataFrame([{"tipo": classificar(o["Key"]), "kb": o["Size"] / 1024} for o in objetos])
-print(resumo.groupby("tipo").agg(arquivos=("kb", "size"), total_kb=("kb", "sum")).round(1))
-
-# Visões de metadados prontas
-print(tabela.inspect.partitions().to_pandas()[["partition", "record_count", "file_count"]])
-print(tabela.inspect.files().to_pandas()[["file_path", "record_count"]].head())
-```
-
-### Verificação Final da Atividade 1
-
-1. Explicar por que cada `append`, `delete` e `upsert` gera um **novo snapshot** e nunca altera arquivos existentes.
-2. Consultar a tabela em um snapshot anterior (por ID e por instante).
-3. Executar exclusão por predicado e explicar por que a LGPD exige também **expirar snapshots**.
-4. Adicionar e renomear colunas sem reescrever dados, explicando o papel dos *field IDs*.
-5. Ler a mesma tabela pelo DuckDB e identificar os quatro níveis de arquivos no MinIO.
+- imagem `curso/spark-jupyter:3.5.0-duckdb` construída e em uso;
+- `notebooks/2_duckdb.ipynb` com as Células 1 a 3 executadas;
+- catálogo `data/iceberg_catalog/catalog.db` com o namespace `bronze_processado`;
+- tabela `bronze_processado.pedidos_ecommerce` criada, ainda **sem dados** (nenhum snapshot), com localização `s3://silver/bronze_processado/pedidos_ecommerce`.
 

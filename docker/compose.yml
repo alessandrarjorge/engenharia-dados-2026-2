@@ -24,7 +24,9 @@ services:
 
   # Jupyter com PySpark e suporte a S3 (MinIO)
   spark-jupyter:
-    image: jupyter/pyspark-notebook:spark-3.5.0
+    # image: jupyter/pyspark-notebook:spark-3.5.0
+    build: ./spark-jupyter
+    image: curso/spark-jupyter:3.5.0-duckdb
     container_name: spark-jupyter
     ports:
       - "8888:8888"   # Interface Jupyter
