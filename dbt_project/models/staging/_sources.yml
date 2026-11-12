@@ -1,0 +1,27 @@
+version: 2
+
+sources:
+  - name: ecommerce
+    description: "Pedidos do sistema de e-commerce (dataset sintético da Aula 1) na camada Bronze"
+    tables:
+      - name: pedidos
+        config:
+          external_location: "read_parquet('{{ var('bronze_root') }}/ecommerce_sintetico/ano=*/**/*.parquet', hive_partitioning = false, union_by_name = true, filename = true)"
+          loaded_at_field: "cast(_ingerido_em as timestamptz)"
+          freshness:
+            warn_after: {count: 7, period: day}
+            error_after: {count: 30, period: day}
+
+  - name: restcountries
+    description: "Países da REST Countries API v5 (Aula 2)"
+    tables:
+      - name: countries
+        config:
+          external_location: "read_parquet('{{ var('bronze_root') }}/restcountries_api/countries/ano=*/**/*.parquet', union_by_name = true, filename = true)"
+
+  - name: pokeapi
+    description: "Pokémons da PokeAPI (Aula 2)"
+    tables:
+      - name: pokemon
+        config:
+          external_location: "read_parquet('{{ var('bronze_root') }}/pokeapi/pokemon/ano=*/**/*.parquet', union_by_name = true, filename = true)"

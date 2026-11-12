@@ -1,0 +1,28 @@
+name: curso_ed
+version: "1.0.0"
+profile: curso_ed
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+snapshot-paths: ["snapshots"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+vars:
+  bronze_root: "s3://bronze"
+  gold_root: "s3://gold"
+  dias_churn: 60
+
+models:
+  curso_ed:
+    staging:
+      +schema: staging
+      +materialized: view
+    intermediate:
+      +schema: intermediate
+      +materialized: view
+    marts:
+      +schema: marts
+      +materialized: table

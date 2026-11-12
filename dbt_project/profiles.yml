@@ -1,0 +1,16 @@
+curso_ed:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('DUCKDB_PATH', '../data/lakehouse.duckdb') }}"
+      threads: 4
+      extensions: [httpfs]
+      secrets:
+        - type: s3
+          key_id: "{{ env_var('MINIO_ACCESS_KEY', 'minioadmin') }}"
+          secret: "{{ env_var('MINIO_SECRET_KEY', 'minioadmin123') }}"
+          endpoint: "{{ env_var('MINIO_ENDPOINT', 'localhost:9000') }}"
+          region: us-east-1
+          url_style: path
+          use_ssl: false

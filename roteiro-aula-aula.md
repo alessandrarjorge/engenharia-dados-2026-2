@@ -3039,6 +3039,8 @@ Localização: s3://silver/bronze_processado/pedidos_ecommerce
 
 ### Final da aula de 29/10/2026
 
+### Aula de 05/11/2026
+
 Estado do ambiente ao final da aula:
 
 - imagem `curso/spark-jupyter:3.5.0-duckdb` construída e em uso;
@@ -3451,7 +3453,7 @@ A pasta `dbt_project/` já existe desde a Aula 1, e o `dbt init` recusa pastas e
 
 ```powershell
 cd dbt_project
-mkdir models/staging, models/intermediate, models/marts/core, models/marts/analytics, models/marts/ml, macros, snapshots, tests, seeds
+md models/staging, models/intermediate, models/marts/core, models/marts/analytics, models/marts/ml, macros, snapshots, tests, seeds
 ```
 
 ```text
@@ -3879,5 +3881,649 @@ dbt show --inline "select segmento_cliente, count(*) as clientes, round(avg(rece
 5. Localizar no *lineage* do `dbt docs` o caminho `source → stg → int`.
 
 > **Desafio:** crie a macro `cents_to_reais(coluna)` e uma *seed* (`seeds/regioes.csv`) com a sigla e o nome completo das regiões, ligada aos pedidos em um novo modelo *intermediate*.
+
+### Final da Aula de 05/11/2026
+
+---
+
+# AULA 7 - Camada Gold (Analytics e IA) e Testes de Dados
+
+## Início da aula de 12/11/2026
+
+**Duração da prática:** 2 horas
+**Pré-requisitos:** projeto dbt da Aula 6 executando com `dbt build` sem erros (💻 host).
+
+| Atividade | Tema | Duração | Onde | Ferramentas |
+|---|---|---|---|---|
+| 1 | Modelo dimensional: dimensões e fato incremental | 30 min | 💻 | dbt, DuckDB |
+| 2 | Histórico com *snapshot* (SCD tipo 2) | 15 min | 💻 | dbt snapshots |
+| 3 | *Marts* analíticos servidos em `s3://gold` | 15 min | 💻 dbt + 🐳 `3_gold.ipynb` | dbt-duckdb (*external*), matplotlib |
+| 4 | Gold para IA: *feature table* com corte temporal e modelo de churn | 20 min | 💻 | dbt, scikit-learn |
+| 5 | Testes de dados: genéricos (dbt_utils), singulares, severidade e *freshness* | 25 min | 💻 | dbt, dbt_utils |
+| 6 | Testes unitários e contratos de modelo | 15 min | 💻 | dbt ≥ 1.8 |
+
+
+---
+
+## Atividade 1 — Modelo Dimensional (Esquema Estrela) 💻
+
+### Objetivo
+
+Construir o núcleo da Camada Gold com o método de Kimball: **declarar o grão**, identificar **dimensões** e **fatos** e gerar **chaves substitutas** (*surrogate keys*). O fato é carregado de forma **incremental**.
+
+### Passo 1 — Desenho antes do código
+
+| Pergunta de Kimball | Resposta para o nosso caso |
+|---|---|
+| Processo de negócio | Venda (pedido) |
+| **Grão** | **Uma linha por pedido** (cada pedido tem um único produto) |
+| Dimensões | Data (`dim_datas`), Cliente (`dim_clientes`), Categoria (`dim_categorias`); Região e Status como atributos de baixa cardinalidade no fato; `produto_id` como **dimensão degenerada** |
+| Fatos (medidas) | `quantidade`, `valor_unitario`, `valor_total`, `valor_faturado` (aditivas); `avaliacao_cliente` (não aditiva → média) |
+
+> **Achado de qualidade:** no dataset sintético, o mesmo `id_produto` aparece em várias categorias (a geração foi aleatória). Por isso **não** criamos `dim_produtos` com categoria. Na Atividade 5, um teste vai detectar e documentar esse problema.
+
+### Passo 2 — Dimensão de datas (`models/marts/core/dim_datas.sql`)
+
+```sql
+-- Calendário gerado por SQL, cobrindo o intervalo dos pedidos
+with limites as (
+    select min(data_pedido) as inicio, max(data_pedido) as fim
+    from {{ ref('int_pedidos__enriquecidos') }}
+),
+calendario as (
+    select cast(unnest(generate_series(inicio, fim, interval 1 day)) as date) as data
+    from limites
+)
+select
+    cast(strftime(data, '%Y%m%d') as integer)       as data_sk,
+    data,
+    year(data)                                      as ano,
+    quarter(data)                                   as trimestre,
+    month(data)                                     as mes,
+    strftime(data, '%Y-%m')                         as ano_mes,
+    day(data)                                       as dia,
+    isodow(data)                                    as dia_semana,
+    isodow(data) in (6, 7)                          as is_fim_de_semana
+from calendario
+```
+
+### Passo 3 — Dimensões de cliente e categoria
+
+`models/marts/core/dim_clientes.sql`:
+
+```sql
+select
+    md5(cast(cliente_id as varchar))     as cliente_sk,      -- chave substituta
+    cliente_id,                                              -- chave natural (do sistema de origem)
+    primeiro_pedido_em,
+    ultimo_pedido_em,
+    total_pedidos,
+    receita_total,
+    segmento_cliente
+from {{ ref('int_clientes__metricas') }}
+```
+
+`models/marts/core/dim_categorias.sql`:
+
+```sql
+select distinct
+    md5(categoria)  as categoria_sk,
+    categoria
+from {{ ref('int_pedidos__enriquecidos') }}
+```
+
+> Em projetos reais, use `{{ dbt_utils.generate_surrogate_key(['col1', 'col2']) }}` (pacote instalado na Atividade 5): ele trata nulos e concatena várias colunas de forma padronizada.
+
+### Passo 4 — Fato incremental (`models/marts/core/fct_pedidos.sql`)
+
+```sql
+{{
+    config(
+        materialized = 'incremental',
+        unique_key = 'pedido_id',
+        incremental_strategy = 'delete+insert'
+    )
+}}
+-- Fato no grão "1 linha por pedido"
+select
+    p.pedido_id,
+    md5(cast(p.cliente_id as varchar))                    as cliente_sk,
+    md5(p.categoria)                                      as categoria_sk,
+    cast(strftime(p.data_pedido, '%Y%m%d') as integer)    as data_sk,
+    p.produto_id,                                         -- dimensão degenerada
+    p.regiao,
+    p.status_pedido,
+    p.faixa_valor,
+    p.quantidade,
+    p.valor_unitario,
+    p.valor_total,
+    case when p.is_faturado then p.valor_total else 0 end as valor_faturado,
+    p.avaliacao_cliente,
+    p.ingerido_em
+from {{ ref('int_pedidos__enriquecidos') }} p
+{% if is_incremental() %}
+-- Só processa o que chegou depois da última carga do fato
+where p.ingerido_em > (select max(ingerido_em) from {{ this }})
+{% endif %}
+```
+
+### Passo 5 — Executar e observar o comportamento incremental
+
+```powershell
+dbt build --select +fct_pedidos          # o "+" inclui todos os ancestrais
+```
+
+Simule uma nova carga na Bronze, com 500 pedidos novos em uma partição de hoje (💻 script no host, MinIO em `localhost:9000`):
+
+```python
+# scripts/12_carga_incremental_demo.py
+import io, boto3, pandas as pd
+from datetime import datetime, timezone
+
+s3 = boto3.client("s3", endpoint_url="http://localhost:9000", aws_access_key_id="minioadmin",
+                  aws_secret_access_key="minioadmin123", region_name="us-east-1")
+chave = next(o["Key"] for o in s3.list_objects_v2(Bucket="bronze", Prefix="ecommerce_sintetico/")["Contents"]
+             if o["Key"].endswith(".parquet"))
+df = pd.read_parquet(io.BytesIO(s3.get_object(Bucket="bronze", Key=chave)["Body"].read())).tail(500).copy()
+df["id_pedido"] += 1_000_000
+df["_ingerido_em"] = datetime.now(timezone.utc).isoformat()
+
+hoje = datetime.now()
+destino = f"ecommerce_sintetico/ano={hoje:%Y}/mes={hoje:%m}/dia={hoje:%d}/pedidos_{int(hoje.timestamp())}.parquet"
+buffer = io.BytesIO(); df.to_parquet(buffer, index=False)
+s3.put_object(Bucket="bronze", Key=destino, Body=buffer.getvalue())
+print("Nova carga:", destino)
+```
+
+```powershell
+python scripts/12_carga_incremental_demo.py
+dbt build --select fct_pedidos            # veja no log: só as novas linhas são processadas
+dbt build --select fct_pedidos --full-refresh   # reconstrói do zero, quando a lógica mudar
+```
+
+> **Discussão:** compare `target/run/.../fct_pedidos.sql` nas duas execuções. Na incremental, o dbt gera `DELETE ... WHERE pedido_id IN (...)` seguido de `INSERT`. Isso torna a carga **idempotente**: reprocessar o mesmo lote não duplica linhas.
+
+---
+
+## Atividade 2 — Histórico de Atributos com *Snapshot* (SCD Tipo 2) 💻
+
+### Objetivo
+
+O segmento do cliente muda com o tempo. A `dim_clientes` mostra só o valor **atual** (SCD tipo 1). Para responder *"qual era o segmento deste cliente quando ele fez o pedido?"*, é preciso guardar o **histórico** (SCD tipo 2).
+
+### Passo 1 — Declarar o snapshot (`snapshots/snp_clientes_segmento.yml`)
+
+```yaml
+snapshots:
+  - name: snp_clientes_segmento
+    relation: ref('int_clientes__metricas')
+    description: "Histórico (SCD tipo 2) do segmento de cada cliente"
+    config:
+      schema: snapshots
+      unique_key: cliente_id
+      strategy: check
+      check_cols: ['segmento_cliente']
+```
+
+### Passo 2 — Dimensão histórica (`models/marts/core/dim_clientes_historico.sql`)
+
+```sql
+select
+    md5(cast(cliente_id as varchar) || cast(dbt_valid_from as varchar)) as cliente_hist_sk,
+    cliente_id,
+    segmento_cliente,
+    dbt_valid_from                                 as valido_de,
+    coalesce(dbt_valid_to, timestamp '9999-12-31') as valido_ate,
+    dbt_valid_to is null                           as is_atual
+from {{ ref('snp_clientes_segmento') }}
+```
+
+### Passo 3 — Provocar uma mudança e observar o histórico
+
+```powershell
+dbt snapshot                              # 1ª execução: uma versão por cliente
+```
+
+Altere a regra do segmento VIP em `int_clientes__metricas.sql` (por exemplo, `score_f >= 3`) e execute de novo:
+
+```powershell
+dbt run --select int_clientes__metricas
+dbt snapshot                              # clientes que mudaram ganham nova linha
+dbt run --select dim_clientes_historico
+```
+
+```sql
+-- dbt show --inline "..."  ou no notebook (read_only=True)
+select cliente_id, segmento_cliente, valido_de, valido_ate, is_atual
+from marts.dim_clientes_historico
+where cliente_id in (select cliente_id from marts.dim_clientes_historico group by 1 having count(*) > 1)
+order by cliente_id, valido_de
+limit 10;
+```
+
+> Ao final, **desfaça** a alteração da regra e rode `dbt build` para voltar ao estado de referência.
+
+---
+
+## Atividade 3 — *Marts* Analíticos Servidos em `s3://gold`
+
+### Objetivo
+
+Publicar produtos de dados prontos para consumo. A materialização `external` do dbt-duckdb grava o resultado como **Parquet no MinIO**, legível por qualquer ferramenta: Superset, Power BI via DuckDB/ODBC, Spark, pandas.
+
+### Passo 1 — Mart de receita mensal (`models/marts/analytics/mart_receita_mensal.sql`)
+
+```sql
+{{ config(
+    materialized = 'external',
+    location = var('gold_root') ~ '/analytics/receita_mensal.parquet'
+) }}
+select
+    d.ano_mes,
+    c.categoria,
+    f.regiao,
+    count(*)                                                    as total_pedidos,
+    count(*) filter (where f.status_pedido = 'faturado')        as pedidos_faturados,
+    sum(f.valor_faturado)                                       as receita,
+    sum(f.valor_faturado)
+      / nullif(count(*) filter (where f.status_pedido = 'faturado'), 0) as ticket_medio,
+    count(distinct f.cliente_sk)                                as clientes_unicos,
+    avg(f.avaliacao_cliente)                                    as nota_media
+from {{ ref('fct_pedidos') }} f
+join {{ ref('dim_datas') }}      d using (data_sk)
+join {{ ref('dim_categorias') }} c using (categoria_sk)
+group by all
+```
+
+```powershell
+dbt build --select mart_receita_mensal
+```
+
+Confira no console do MinIO (`http://localhost:9001`) o objeto `gold/analytics/receita_mensal.parquet`.
+
+### Passo 2 — Consumo pelo analista 🐳 (notebook `notebooks/3_gold.ipynb`)
+
+O analista lê o Parquet da Gold diretamente no MinIO, sem abrir o `lakehouse.duckdb` do dbt (regra 2 de convivência).
+
+```python
+import duckdb
+import matplotlib.pyplot as plt
+
+con = duckdb.connect()
+con.execute("INSTALL httpfs; LOAD httpfs;")
+con.execute("""CREATE SECRET minio (TYPE s3, KEY_ID 'minioadmin', SECRET 'minioadmin123',
+               ENDPOINT 'host.docker.internal:9000', URL_STYLE 'path', USE_SSL false, REGION 'us-east-1')""")
+
+receita = con.sql("""
+    SELECT ano_mes, categoria, SUM(receita) / 1e6 AS receita_mi
+    FROM 's3://gold/analytics/receita_mensal.parquet'
+    GROUP BY ALL ORDER BY ano_mes
+""").df()
+
+pivot = receita.pivot(index="ano_mes", columns="categoria", values="receita_mi")
+ax = pivot.plot(figsize=(11, 4.5), marker="o", linewidth=1.5)
+ax.set_title("Receita faturada mensal por categoria (R$ milhões)")
+ax.set_xlabel(""); ax.set_ylabel("R$ mi"); ax.grid(alpha=.3)
+plt.tight_layout(); plt.show()
+```
+
+> **Discussão — esquema estrela × OBT:** o *mart* é uma tabela larga (*One Big Table*) já agregada, gerada a partir do esquema estrela. O estrela continua sendo a fonte única de verdade; as OBTs são **visões de entrega**, otimizadas para um consumidor específico.
+
+---
+
+## Atividade 4 — Gold para IA: *Feature Table* e Modelo de Churn 💻
+
+### Objetivo
+
+Produzir uma tabela de *features* **sem vazamento de dados** (*data leakage*). As *features* usam apenas o passado em relação a uma **data de corte**, e o rótulo (churn) observa o período **depois** dela. Em seguida, treinar e avaliar um modelo consumindo a Gold.
+
+### Passo 1 — *Feature table* (`models/marts/ml/ml_features_clientes.sql`)
+
+```sql
+{{ config(
+    materialized = 'external',
+    location = var('gold_root') ~ '/ml/features_clientes.parquet'
+) }}
+-- Corte temporal (point-in-time): features ANTES da data de corte; rótulo DEPOIS dela.
+{% set dias = var('dias_churn') %}
+
+with pedidos as (
+    select * from {{ ref('int_pedidos__enriquecidos') }}
+),
+corte as (
+    select max(data_pedido) - interval {{ dias }} day as data_corte
+    from pedidos
+),
+features as (
+    select
+        p.cliente_id,
+        count(*)                                                     as qtd_pedidos,
+        count(*) filter (where p.is_faturado)                        as qtd_faturados,
+        count(*) filter (where p.status_pedido = 'cancelado')        as qtd_cancelados,
+        coalesce(sum(p.valor_total) filter (where p.is_faturado), 0) as receita,
+        avg(p.valor_total)                                           as ticket_medio,
+        avg(p.avaliacao_cliente)                                     as nota_media,
+        count(distinct p.categoria)                                  as categorias_distintas,
+        date_diff('day', max(p.data_pedido), any_value(c.data_corte)::date) as dias_desde_ultimo
+    from pedidos p
+    cross join corte c
+    where p.data_pedido < c.data_corte
+    group by p.cliente_id
+),
+rotulo as (            -- clientes que COMPRARAM depois do corte (portanto, não churnaram)
+    select distinct p.cliente_id
+    from pedidos p cross join corte c
+    where p.data_pedido >= c.data_corte
+)
+select
+    f.*,
+    case when r.cliente_id is null then 1 else 0 end as churn
+from features f
+left join rotulo r using (cliente_id)
+```
+
+```powershell
+dbt build --select ml_features_clientes
+```
+
+### Passo 2 — Treino do modelo (`scripts/13_treinar_churn.py`)
+
+```powershell
+# host, .venv ativo
+pip install scikit-learn joblib
+```
+
+```python
+"""Treina um modelo de churn a partir da Gold (s3://gold/ml/features_clientes.parquet)."""
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
+import duckdb
+import joblib
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.metrics import average_precision_score, roc_auc_score
+from sklearn.model_selection import train_test_split
+
+GOLD_ROOT = os.getenv("GOLD_ROOT", "s3://gold")
+SAIDA = Path(os.getenv("CURSO_HOME", ".")) / "data" / "modelos"
+
+con = duckdb.connect()
+if GOLD_ROOT.startswith("s3://"):
+    con.execute("INSTALL httpfs; LOAD httpfs;")
+    con.execute(f"""CREATE SECRET minio (TYPE s3, KEY_ID '{os.getenv("MINIO_ACCESS_KEY", "minioadmin")}',
+        SECRET '{os.getenv("MINIO_SECRET_KEY", "minioadmin123")}', ENDPOINT '{os.getenv("MINIO_ENDPOINT", "localhost:9000")}',
+        URL_STYLE 'path', USE_SSL false, REGION 'us-east-1')""")
+
+df = con.sql(f"SELECT * FROM read_parquet('{GOLD_ROOT}/ml/features_clientes.parquet')").df()
+X, y = df.drop(columns=["cliente_id", "churn"]), df["churn"]
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.25, random_state=42, stratify=y)
+
+modelo = HistGradientBoostingClassifier(random_state=42).fit(X_tr, y_tr)
+proba = modelo.predict_proba(X_te)[:, 1]
+metricas = {
+    "treinado_em": datetime.now(timezone.utc).isoformat(),
+    "linhas": len(df),
+    "taxa_churn": round(float(y.mean()), 4),
+    "roc_auc": round(roc_auc_score(y_te, proba), 4),
+    "pr_auc": round(average_precision_score(y_te, proba), 4),
+    "features": list(X.columns),
+}
+SAIDA.mkdir(parents=True, exist_ok=True)
+joblib.dump(modelo, SAIDA / "churn.joblib")
+(SAIDA / "churn_metricas.json").write_text(json.dumps(metricas, indent=2, ensure_ascii=False))
+print(json.dumps(metricas, indent=2, ensure_ascii=False))
+```
+
+```powershell
+python scripts/13_treinar_churn.py
+```
+
+> **Resultado esperado e lição importante:** taxa de churn ≈ 17–18% e **ROC-AUC ≈ 0,50**. O dataset sintético foi gerado com sorteios independentes, então **não existe sinal** a aprender. O modelo empata com o acaso, que é o comportamento correto. Uma AUC alta aqui indicaria **vazamento** (por exemplo, calcular `dias_desde_ultimo` com pedidos posteriores ao corte). **Exercício:** remova o `where p.data_pedido < c.data_corte`, rode de novo e observe a AUC saltar para ≈ 1,0: o `dias_desde_ultimo` passa a revelar quem comprou depois do corte.
+
+### Passo 3 — Execução completa da Gold
+
+```powershell
+dbt build                 # Silver + Gold + snapshot + testes
+dbt docs generate; dbt docs serve --port 8081
+```
+
+### Verificação Final da Gold (Atividades 1 a 4)
+
+1. Declarar o grão de `fct_pedidos` e justificar cada dimensão e medida (aditiva, semi-aditiva, não aditiva).
+2. Explicar *surrogate key* × chave natural e o que é uma dimensão degenerada.
+3. Diferenciar SCD tipo 1 (`dim_clientes`) e tipo 2 (`dim_clientes_historico`).
+4. Explicar quando usar `table`, `view`, `incremental` e `external`.
+5. Explicar o corte temporal da *feature table* e demonstrar o efeito do vazamento.
+
+> **Desafio:** crie `fct_pedidos_mensal_cliente`, um **snapshot periódico** com grão cliente × mês, e uma *feature* "receita dos últimos 90 dias" calculada com *window function* (`range between interval 90 day preceding and current row`).
+
+---
+
+## Atividade 5 — Testes de Dados 💻
+
+### Objetivo
+
+Transformar regras de negócio em **testes automatizados versionados** (*data quality as code*), com severidade adequada e falhas armazenadas para investigação.
+
+### Passo 1 — Pacote `dbt_utils` (`dbt_project/packages.yml`)
+
+```yaml
+packages:
+  - package: dbt-labs/dbt_utils
+    version: [">=1.3.0", "<2.0.0"]
+```
+
+```powershell
+cd dbt_project
+dbt deps
+```
+
+### Passo 2 — Testes genéricos nos modelos Gold (`models/marts/core/_core.yml`)
+
+```yaml
+version: 2
+
+models:
+  - name: fct_pedidos
+    description: "Fato de pedidos — grão: 1 linha por pedido."
+    data_tests:
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "valor_faturado <= valor_total"
+      - dbt_utils.recency:
+          arguments:
+            field: ingerido_em
+            datepart: day
+            interval: 7
+          config:
+            severity: warn          # dado "velho" alerta, mas não derruba o pipeline
+    columns:
+      - name: pedido_id
+        data_tests: [unique, not_null]
+      - name: cliente_sk
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_clientes')
+                field: cliente_sk
+      - name: data_sk
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_datas')
+                field: data_sk
+      - name: valor_total
+        data_tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+      - name: avaliacao_cliente
+        data_tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 1
+                max_value: 5
+              config:
+                where: "avaliacao_cliente is not null"
+
+  - name: mart_receita_mensal
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [ano_mes, categoria, regiao]
+```
+
+> A definição de `dim_clientes` entra neste mesmo arquivo na Atividade 6 (contrato).
+
+### Passo 3 — Testes singulares (`tests/`)
+
+Um teste singular é um SELECT que deve retornar **zero linhas**.
+
+`tests/assert_valor_total_consistente.sql`:
+
+```sql
+-- valor_total deve ser valor_unitario × quantidade (tolerância de 1 centavo)
+select pedido_id, valor_unitario, quantidade, valor_total
+from {{ ref('int_pedidos__enriquecidos') }}
+where abs(valor_total - valor_unitario * quantidade) > 0.01
+```
+
+`tests/assert_produto_em_categoria_unica.sql` documenta o achado de qualidade da Atividade 1:
+
+```sql
+{{ config(severity = 'warn', store_failures = true) }}
+-- Regra de negócio: um produto pertence a UMA categoria.
+-- No dataset sintético isso não é garantido -> WARN e falhas gravadas para análise.
+select produto_id, count(distinct categoria) as qtd_categorias
+from {{ ref('int_pedidos__enriquecidos') }}
+group by produto_id
+having count(distinct categoria) > 1
+```
+
+### Passo 4 — Executar e investigar falhas
+
+```powershell
+dbt build
+# Resultado esperado: PASS em todos, exceto WARN 10000 em assert_produto_em_categoria_unica
+```
+
+```sql
+-- As falhas ficam em uma tabela de auditoria (store_failures)
+-- dbt show --inline "select * from dbt_test__audit.assert_produto_em_categoria_unica limit 5"
+```
+
+### Passo 5 — *Freshness* das fontes
+
+```powershell
+dbt source freshness
+```
+
+A configuração `warn_after`/`error_after` está em `_sources.yml` (Aula 6). Em produção, esse comando roda **antes** das transformações: se a Bronze está atrasada, não adianta recalcular a Gold.
+
+> **Experimento:** altere `error_after` para `{count: 1, period: minute}` e rode de novo para ver o erro. Depois desfaça.
+
+---
+
+## Atividade 6 — Testes Unitários e Contratos de Modelo 💻
+
+### Objetivo
+
+Distinguir **teste de dados** (os dados de hoje estão corretos?) de **teste unitário** (a *lógica* do SQL está correta para entradas conhecidas?) e garantir a **interface** dos modelos públicos com contratos.
+
+### Passo 1 — Testes unitários (`models/intermediate/_unit_tests.yml`)
+
+```yaml
+unit_tests:
+  - name: test_deduplicacao_mantem_versao_mais_recente
+    description: "Quando o mesmo pedido chega em duas cargas, fica a versão com ingerido_em mais recente."
+    model: int_pedidos__deduplicados
+    given:
+      - input: ref('stg_ecommerce__pedidos')
+        rows:
+          - {pedido_id: 1, status_pedido: em_aberto, ingerido_em: "2026-03-10 10:00:00+00", arquivo_origem: "a.parquet"}
+          - {pedido_id: 1, status_pedido: faturado,  ingerido_em: "2026-03-11 10:00:00+00", arquivo_origem: "b.parquet"}
+          - {pedido_id: 2, status_pedido: cancelado, ingerido_em: "2026-03-10 10:00:00+00", arquivo_origem: "a.parquet"}
+    expect:
+      rows:
+        - {pedido_id: 1, status_pedido: faturado}
+        - {pedido_id: 2, status_pedido: cancelado}
+
+  - name: test_faixa_valor_limites
+    description: "Valores de fronteira das faixas de valor e sequência de pedidos do cliente."
+    model: int_pedidos__enriquecidos
+    given:
+      - input: ref('int_pedidos__deduplicados')
+        rows:
+          - {pedido_id: 1, cliente_id: 1, valor_total: 99.99,   status_pedido: faturado, pedido_em: "2022-01-01 10:00:00", data_pedido: "2022-01-01"}
+          - {pedido_id: 2, cliente_id: 1, valor_total: 100.00,  status_pedido: faturado, pedido_em: "2022-01-02 10:00:00", data_pedido: "2022-01-02"}
+          - {pedido_id: 3, cliente_id: 1, valor_total: 1500.00, status_pedido: faturado, pedido_em: "2022-01-03 10:00:00", data_pedido: "2022-01-03"}
+    expect:
+      rows:
+        - {pedido_id: 1, faixa_valor: baixo,   sequencia_pedido_cliente: 1}
+        - {pedido_id: 2, faixa_valor: medio,   sequencia_pedido_cliente: 2}
+        - {pedido_id: 3, faixa_valor: premium, sequencia_pedido_cliente: 3}
+```
+
+```powershell
+dbt test --select test_type:unit
+```
+
+> **Exercício (TDD):** troque `<` por `<=` no `case` de `faixa_valor` e rode o teste: ele deve falhar e mostrar a diferença entre o esperado e o obtido. Desfaça a alteração.
+
+Testes unitários **não leem a Bronze**: o dbt monta as entradas a partir das linhas declaradas. Por isso rodam rápido e podem ir para o CI.
+
+### Passo 2 — Contrato do modelo público `dim_clientes`
+
+Acrescente ao `models/marts/core/_core.yml`:
+
+```yaml
+  - name: dim_clientes
+    description: "Dimensão de clientes com segmento RFM atual."
+    config:
+      contract:
+        enforced: true
+      access: public
+      meta:
+        owner: "analytics@curso.example"
+        contem_pii: true
+    columns:
+      - name: cliente_sk
+        data_type: varchar
+        constraints:
+          - type: not_null
+          - type: primary_key
+        data_tests: [unique]
+      - name: cliente_id
+        data_type: bigint
+        meta: {pii: true}
+        constraints: [{type: not_null}]
+      - name: primeiro_pedido_em
+        data_type: date
+      - name: ultimo_pedido_em
+        data_type: date
+      - name: total_pedidos
+        data_type: bigint
+      - name: receita_total
+        data_type: decimal(38,2)
+      - name: segmento_cliente
+        data_type: varchar
+```
+
+```powershell
+dbt build --select dim_clientes
+```
+
+> **Experimento:** no SQL de `dim_clientes`, troque `total_pedidos` por `cast(total_pedidos as integer) as total_pedidos`. O `dbt build` falha **antes** de criar a tabela, com o erro de contrato. Contratos protegem os consumidores contra mudanças de interface acidentais.
+
+### Consolidação da Aula 7
+
+1. Declarar o grão de `fct_pedidos` e justificar dimensões e medidas (aditivas, semi-aditivas, não aditivas).
+2. Diferenciar SCD tipo 1 (`dim_clientes`) e tipo 2 (`dim_clientes_historico`).
+3. Explicar o corte temporal da *feature table* e por que a AUC ≈ 0,50 é o resultado correto neste dataset.
+4. Classificar os testes criados por dimensão de qualidade e justificar o uso de `severity: warn` e `store_failures`.
+5. Explicar teste de dados × teste unitário × contrato e onde cada um roda (desenvolvimento, CI, produção).
 
 ---

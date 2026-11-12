@@ -1,0 +1,20 @@
+version: 2
+
+models:
+  - name: int_pedidos__deduplicados
+    description: "Última versão de cada pedido (deduplicação por pedido_id)."
+    columns:
+      - name: pedido_id
+        data_tests: [unique, not_null]
+
+  - name: int_clientes__metricas
+    description: "Uma linha por cliente com métricas RFM e segmento."
+    columns:
+      - name: cliente_id
+        data_tests: [unique, not_null]
+      - name: segmento_cliente
+        description: "vip = quintil superior em valor, com alta frequência e recência"
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['vip', 'alto_valor', 'em_risco', 'regular']
