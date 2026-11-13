@@ -1,0 +1,82 @@
+version: 2
+
+models:
+  - name: fct_pedidos
+    description: "Fato de pedidos — grão: 1 linha por pedido."
+    data_tests:
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "valor_faturado <= valor_total"
+      - dbt_utils.recency:
+          arguments:
+            field: ingerido_em
+            datepart: day
+            interval: 7
+          config:
+            severity: warn          # dado "velho" alerta, mas não derruba o pipeline
+    columns:
+      - name: pedido_id
+        data_tests: [unique, not_null]
+      - name: cliente_sk
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_clientes')
+                field: cliente_sk
+      - name: data_sk
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_datas')
+                field: data_sk
+      - name: valor_total
+        data_tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+      - name: avaliacao_cliente
+        data_tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 1
+                max_value: 5
+              config:
+                where: "avaliacao_cliente is not null"
+
+  - name: mart_receita_mensal
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [ano_mes, categoria, regiao]
+
+  - name: dim_clientes
+    description: "Dimensão de clientes com segmento RFM atual."
+    config:
+      contract:
+        enforced: true
+      access: public
+      meta:
+        owner: "analytics@curso.example"
+        contem_pii: true
+    columns:
+      - name: cliente_sk
+        data_type: varchar
+        constraints:
+          - type: not_null
+          - type: primary_key
+        data_tests: [unique]
+      - name: cliente_id
+        data_type: bigint
+        meta: {pii: true}
+        constraints: [{type: not_null}]
+      - name: primeiro_pedido_em
+        data_type: date
+      - name: ultimo_pedido_em
+        data_type: date
+      - name: total_pedidos
+        data_type: bigint
+      - name: receita_total
+        data_type: decimal(38,2)
+      - name: segmento_cliente
+        data_type: varchar

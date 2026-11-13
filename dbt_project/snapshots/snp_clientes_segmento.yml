@@ -1,0 +1,9 @@
+snapshots:
+  - name: snp_clientes_segmento
+    relation: ref('int_clientes__metricas')
+    description: "Histórico (SCD tipo 2) do segmento de cada cliente"
+    config:
+      schema: snapshots
+      unique_key: cliente_id
+      strategy: check
+      check_cols: ['segmento_cliente']

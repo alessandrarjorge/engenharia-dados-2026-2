@@ -1,0 +1,29 @@
+unit_tests:
+  - name: test_deduplicacao_mantem_versao_mais_recente
+    description: "Quando o mesmo pedido chega em duas cargas, fica a versão com ingerido_em mais recente."
+    model: int_pedidos__deduplicados
+    given:
+      - input: ref('stg_ecommerce__pedidos')
+        rows:
+          - {pedido_id: 1, status_pedido: em_aberto, ingerido_em: "2026-03-10 10:00:00+00", arquivo_origem: "a.parquet"}
+          - {pedido_id: 1, status_pedido: faturado,  ingerido_em: "2026-03-11 10:00:00+00", arquivo_origem: "b.parquet"}
+          - {pedido_id: 2, status_pedido: cancelado, ingerido_em: "2026-03-10 10:00:00+00", arquivo_origem: "a.parquet"}
+    expect:
+      rows:
+        - {pedido_id: 1, status_pedido: faturado}
+        - {pedido_id: 2, status_pedido: cancelado}
+
+  - name: test_faixa_valor_limites
+    description: "Valores de fronteira das faixas de valor e sequência de pedidos do cliente."
+    model: int_pedidos__enriquecidos
+    given:
+      - input: ref('int_pedidos__deduplicados')
+        rows:
+          - {pedido_id: 1, cliente_id: 1, valor_total: 99.99,   status_pedido: faturado, pedido_em: "2022-01-01 10:00:00", data_pedido: "2022-01-01"}
+          - {pedido_id: 2, cliente_id: 1, valor_total: 100.00,  status_pedido: faturado, pedido_em: "2022-01-02 10:00:00", data_pedido: "2022-01-02"}
+          - {pedido_id: 3, cliente_id: 1, valor_total: 1500.00, status_pedido: faturado, pedido_em: "2022-01-03 10:00:00", data_pedido: "2022-01-03"}
+    expect:
+      rows:
+        - {pedido_id: 1, faixa_valor: baixo,   sequencia_pedido_cliente: 1}
+        - {pedido_id: 2, faixa_valor: medio,   sequencia_pedido_cliente: 2}
+        - {pedido_id: 3, faixa_valor: premium, sequencia_pedido_cliente: 3}
